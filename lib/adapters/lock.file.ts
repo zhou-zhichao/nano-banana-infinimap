@@ -1,24 +1,26 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { LOCK_DIR } from "../paths";
+import { mapLocksDir } from "../tilemaps/paths";
 
-let ensured = false;
-async function ensureLockDir() {
-  if (!ensured) {
-    await fs.mkdir(LOCK_DIR, { recursive: true }).catch(() => {});
-    ensured = true;
+const ensuredMaps = new Set<string>();
+async function ensureLockDir(mapId: string) {
+  const lockDir = mapLocksDir(mapId);
+  if (!ensuredMaps.has(mapId)) {
+    await fs.mkdir(lockDir, { recursive: true }).catch(() => {});
+    ensuredMaps.add(mapId);
     // Clean up stale locks on startup
-    await cleanStaleLocks();
+    await cleanStaleLocks(mapId);
   }
 }
 
-async function cleanStaleLocks() {
+async function cleanStaleLocks(mapId: string) {
+  const lockDir = mapLocksDir(mapId);
   try {
-    const files = await fs.readdir(LOCK_DIR);
+    const files = await fs.readdir(lockDir);
     const now = Date.now();
     for (const file of files) {
       if (file.endsWith('.lock')) {
-        const lockFile = path.join(LOCK_DIR, file);
+        const lockFile = path.join(lockDir, file);
         const stats = await fs.stat(lockFile).catch(() => null);
         if (stats && (now - stats.mtimeMs > 30000)) { // Remove locks older than 30 seconds
           await fs.rm(lockFile).catch(() => {});
@@ -29,11 +31,11 @@ async function cleanStaleLocks() {
   } catch {}
 }
 
-function lockPath(name:string) { return path.join(LOCK_DIR, `${name}.lock`); }
+function lockPath(mapId: string, name:string) { return path.join(mapLocksDir(mapId), `${name}.lock`); }
 
-export async function withFileLock<T>(name:string, fn:()=>Promise<T>): Promise<T> {
-  await ensureLockDir();
-  const p = lockPath(name);
+export async function withFileLock<T>(mapId: string, name:string, fn:()=>Promise<T>): Promise<T> {
+  await ensureLockDir(mapId);
+  const p = lockPath(mapId, name);
   const start = Date.now();
   
   // Check if lock exists and is stale

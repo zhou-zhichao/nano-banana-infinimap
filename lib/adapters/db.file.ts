@@ -1,31 +1,30 @@
 import fs from "node:fs/promises";
-import path from "node:path";
-import { META_DIR } from "../paths";
-import { DB, TileRecord, key } from "./db";
+import { mapMetaDir, mapMetaPath } from "../tilemaps/paths";
+import { DB, TileRecord } from "./db";
 
-async function ensureDirs() {
-  await fs.mkdir(META_DIR, { recursive: true }).catch(() => {});
+const ensuredMaps = new Set<string>();
+async function ensureDirs(mapId: string) {
+  if (ensuredMaps.has(mapId)) return;
+  await fs.mkdir(mapMetaDir(mapId), { recursive: true }).catch(() => {});
+  ensuredMaps.add(mapId);
 }
 
-function metaPath(z:number,x:number,y:number) {
-  return path.join(META_DIR, `${key(z,x,y)}.json`);
+function metaPath(mapId: string, z:number,x:number,y:number) {
+  return mapMetaPath(mapId, z, x, y);
 }
 
 export class FileDB implements DB {
-  ready: Promise<void>;
-  constructor(){ this.ready = ensureDirs(); }
-
-  async getTile(z:number,x:number,y:number): Promise<TileRecord|null> {
-    await this.ready;
+  async getTile(mapId: string, z:number,x:number,y:number): Promise<TileRecord|null> {
+    await ensureDirs(mapId);
     try {
-      const buf = await fs.readFile(metaPath(z,x,y), "utf-8");
+      const buf = await fs.readFile(metaPath(mapId, z, x, y), "utf-8");
       return JSON.parse(buf) as TileRecord;
     } catch { return null; }
   }
 
-  async upsertTile(tr: Partial<TileRecord> & { z:number; x:number; y:number }): Promise<TileRecord> {
-    await this.ready;
-    const current = await this.getTile(tr.z, tr.x, tr.y);
+  async upsertTile(mapId: string, tr: Partial<TileRecord> & { z:number; x:number; y:number }): Promise<TileRecord> {
+    await ensureDirs(mapId);
+    const current = await this.getTile(mapId, tr.z, tr.x, tr.y);
     const now = new Date().toISOString();
     const merged: TileRecord = {
       z: tr.z, x: tr.x, y: tr.y,
@@ -37,12 +36,12 @@ export class FileDB implements DB {
       updatedAt: now,
     };
     if (tr.status) merged.status = tr.status;
-    await fs.writeFile(metaPath(tr.z,tr.x,tr.y), JSON.stringify(merged));
+    await fs.writeFile(metaPath(mapId, tr.z, tr.x, tr.y), JSON.stringify(merged));
     return merged;
   }
 
-  async updateTile(z:number,x:number,y:number, patch: Partial<TileRecord>): Promise<TileRecord> {
-    const cur = await this.getTile(z,x,y);
+  async updateTile(mapId: string, z:number,x:number,y:number, patch: Partial<TileRecord>): Promise<TileRecord> {
+    const cur = await this.getTile(mapId, z, x, y);
     const now = new Date().toISOString();
     const merged: TileRecord = {
       z,x,y,
@@ -53,12 +52,14 @@ export class FileDB implements DB {
       createdAt: cur?.createdAt ?? now,
       updatedAt: now,
     };
-    await fs.writeFile(metaPath(z,x,y), JSON.stringify(merged));
+    await fs.writeFile(metaPath(mapId, z, x, y), JSON.stringify(merged));
     return merged;
   }
 
-  async getTiles(batch:{z:number,x:number,y:number}[]): Promise<TileRecord[]> {
-    return Promise.all(batch.map(b => this.getTile(b.z,b.x,b.y))).then(list => list.map(x=>x??({z:0,x:0,y:0,status:"EMPTY"} as any)));
+  async getTiles(mapId: string, batch:{z:number,x:number,y:number}[]): Promise<TileRecord[]> {
+    return Promise.all(batch.map((b) => this.getTile(mapId, b.z, b.x, b.y))).then((list) =>
+      list.map((x) => x ?? ({ z: 0, x: 0, y: 0, status: "EMPTY" } as any)),
+    );
   }
 }
 

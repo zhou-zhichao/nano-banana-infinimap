@@ -15,6 +15,7 @@ export type EstimatedGridDrift = {
 };
 
 export type EstimateGridDriftParams = {
+  mapId: string;
   rawComposite: Buffer;
   z: number;
   centerX: number;
@@ -214,6 +215,7 @@ export async function estimateGridDriftFromExistingTiles(
   params: EstimateGridDriftParams
 ): Promise<EstimatedGridDrift> {
   const {
+    mapId,
     rawComposite,
     z,
     centerX,
@@ -234,7 +236,7 @@ export async function estimateGridDriftFromExistingTiles(
       const key = `${tileX},${tileY}`;
       if (selectedSet && !selectedSet.has(key)) continue;
 
-      const existingTile = await readTileFile(z, tileX, tileY);
+      const existingTile = await readTileFile(mapId, z, tileX, tileY);
       if (!existingTile) continue;
 
       const rawTile = await sharp(rawComposite)

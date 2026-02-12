@@ -17,7 +17,7 @@ export function hashTilePayload(payload: {
   return blake2sHex(s).slice(0, 16);
 }
 
-export async function bubbleHashes(z:number,x:number,y:number) {
+export async function bubbleHashes(mapId: string, z:number,x:number,y:number) {
   let cur = { z,x,y };
   while (cur.z > 0) {
     const p = parentOf(cur.z, cur.x, cur.y);
@@ -27,12 +27,12 @@ export async function bubbleHashes(z:number,x:number,y:number) {
       { z: p.z + 1, x: p.x * 2,     y: p.y * 2 + 1 },
       { z: p.z + 1, x: p.x * 2 + 1, y: p.y * 2 + 1 },
     ];
-    const tiles = await db.getTiles(kids);
+    const tiles = await db.getTiles(mapId, kids);
     const childHashes = tiles.map(t => t?.hash ?? "EMPTY");
     const bytesHash = "PARENT";
     const newHash = hashTilePayload({ algorithmVersion: 1, contentVer: 1, bytesHash, childHashes });
     const anyReady = tiles.some(t => t?.status === "READY");
-    await db.upsertTile({ z: p.z, x: p.x, y: p.y, status: anyReady ? "READY" : "EMPTY", hash: newHash });
+    await db.upsertTile(mapId, { z: p.z, x: p.x, y: p.y, status: anyReady ? "READY" : "EMPTY", hash: newHash });
     cur = p;
   }
 }

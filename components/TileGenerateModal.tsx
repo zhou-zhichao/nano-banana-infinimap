@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import * as Tabs from "@radix-ui/react-tabs";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
@@ -15,6 +15,7 @@ import {
 } from "@/lib/modelVariant";
 
 interface TileGenerateModalProps {
+  mapId: string;
   open: boolean;
   onClose: () => void;
   x: number;
@@ -26,7 +27,7 @@ interface TileGenerateModalProps {
 const TILE_SIZE = 256;
 const GRID_SIZE = 3;
 
-export function TileGenerateModal({ open, onClose, x, y, z, onUpdate }: TileGenerateModalProps) {
+export function TileGenerateModal({ mapId, open, onClose, x, y, z, onUpdate }: TileGenerateModalProps) {
   const [tiles, setTiles] = useState<string[][]>([]);
   const [prompt, setPrompt] = useState("");
   const [modelVariant, setModelVariant] = useState<ModelVariant>(DEFAULT_MODEL_VARIANT);
@@ -48,6 +49,11 @@ export function TileGenerateModal({ open, onClose, x, y, z, onUpdate }: TileGene
   const [nudgeOpen, setNudgeOpen] = useState<boolean>(false);
   const [nudgeApplied, setNudgeApplied] = useState<boolean>(false);
 
+  const withMapId = useCallback(
+    (url: string) => `${url}${url.includes("?") ? "&" : "?"}mapId=${encodeURIComponent(mapId)}`,
+    [mapId],
+  );
+
   // Load the 3x3 grid of tiles with selective cache busting
   useEffect(() => {
     if (!open) return;
@@ -64,7 +70,7 @@ export function TileGenerateModal({ open, onClose, x, y, z, onUpdate }: TileGene
           const tileX = x + dx;
           const tileY = y + dy;
           metadataPromises.push(
-            fetch(`/api/meta/${z}/${tileX}/${tileY}`)
+            fetch(withMapId(`/api/meta/${z}/${tileX}/${tileY}`))
               .then(r => r.json())
               .then(data => ({ x: tileX, y: tileY, ...data }))
           );
@@ -90,7 +96,7 @@ export function TileGenerateModal({ open, onClose, x, y, z, onUpdate }: TileGene
           const cacheBuster = tileMeta?.updatedAt 
             ? new Date(tileMeta.updatedAt).getTime() 
             : Date.now();
-          const url = `/api/tiles/${z}/${tileX}/${tileY}?v=${cacheBuster}`;
+          const url = withMapId(`/api/tiles/${z}/${tileX}/${tileY}?v=${cacheBuster}`);
           row.push(url);
         }
         newTiles.push(row);
@@ -104,7 +110,7 @@ export function TileGenerateModal({ open, onClose, x, y, z, onUpdate }: TileGene
     };
     
     loadTiles();
-  }, [open, x, y, z]);
+  }, [mapId, open, withMapId, x, y, z]);
 
   // Extract 9 tiles from a composite image
   const extractTilesFromComposite = async (compositeUrl: string): Promise<string[][]> => {
@@ -157,8 +163,14 @@ export function TileGenerateModal({ open, onClose, x, y, z, onUpdate }: TileGene
   const loadPreviewTiles = async (id: string, blended: boolean, txOverride?: number, tyOverride?: number) => {
     const tx = (txOverride != null ? Math.round(txOverride) : Math.round(offsetX)) || 0;
     const ty = (tyOverride != null ? Math.round(tyOverride) : Math.round(offsetY)) || 0;
-    const qp = blended ? `?mode=blended&tx=${tx}&ty=${ty}` : '';
-    const url = `/api/preview/${id}${qp}`;
+    const params = new URLSearchParams();
+    params.set("mapId", mapId);
+    if (blended) {
+      params.set("mode", "blended");
+      params.set("tx", String(tx));
+      params.set("ty", String(ty));
+    }
+    const url = `/api/preview/${id}?${params.toString()}`;
     setPreviewUrl(url);
     const extractedTiles = await extractTilesFromComposite(url);
     setPreviewTiles(extractedTiles);
@@ -189,7 +201,7 @@ export function TileGenerateModal({ open, onClose, x, y, z, onUpdate }: TileGene
     try {
       setDriftLoading(true);
       // Ensure we have raw generated tiles
-      const rawUrl = `/api/preview/${id}`; // raw mode
+      const rawUrl = withMapId(`/api/preview/${id}`); // raw mode
       const rawTiles = await extractTilesFromComposite(rawUrl);
       if (!tiles || !rawTiles) return;
 
@@ -258,7 +270,7 @@ export function TileGenerateModal({ open, onClose, x, y, z, onUpdate }: TileGene
     setError(null);
     
     try {
-      const response = await fetch(`/api/edit-tile/${z}/${x}/${y}`, {
+      const response = await fetch(withMapId(`/api/edit-tile/${z}/${x}/${y}`), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ prompt, modelVariant }),
@@ -284,11 +296,11 @@ export function TileGenerateModal({ open, onClose, x, y, z, onUpdate }: TileGene
     setLoading(true);
     
     try {
-      const response = await fetch(`/api/confirm-edit/${z}/${x}/${y}`, {
+      const response = await fetch(withMapId(`/api/confirm-edit/${z}/${x}/${y}`), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ 
-          previewUrl: `/api/preview/${previewId}`,
+          previewUrl: withMapId(`/api/preview/${previewId}`),
           selectedPositions: Array.from(selectedPositions).map(s => { const [sx,sy] = s.split(',').map(Number); return { x: sx, y: sy }; }),
           offsetX: nudgeApplied ? Math.round(offsetX) : undefined,
           offsetY: nudgeApplied ? Math.round(offsetY) : undefined,
@@ -311,7 +323,7 @@ export function TileGenerateModal({ open, onClose, x, y, z, onUpdate }: TileGene
     setLoading(true);
     setError(null);
     try {
-      const response = await fetch(`/api/edit-tile/${z}/${x}/${y}`, {
+      const response = await fetch(withMapId(`/api/edit-tile/${z}/${x}/${y}`), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ prompt, modelVariant }),

@@ -1,61 +1,71 @@
-import { NextRequest, NextResponse } from "next/server";
-import { ZMAX, parentOf, childrenOf } from "@/lib/coords";
-import { db } from "@/lib/adapters/db.file";
 import fs from "node:fs/promises";
-import { tilePath } from "@/lib/storage";
+import { NextRequest, NextResponse } from "next/server";
+import { childrenOf, parentOf, ZMAX } from "@/lib/coords";
+import { db } from "@/lib/adapters/db.file";
 import { generateParentTile } from "@/lib/parentTiles";
+import { tilePath } from "@/lib/storage";
+import { isTileInBounds } from "@/lib/tilemaps/bounds";
+import { MapContextError, resolveMapContext } from "@/lib/tilemaps/context";
 
-export async function DELETE(req: NextRequest, { params }: { params: Promise<{ z: string, x: string, y: string }> }) {
+export async function DELETE(req: NextRequest, { params }: { params: Promise<{ z: string; x: string; y: string }> }) {
+  let mapId = "default";
+  let map: any = null;
+  try {
+    const resolved = await resolveMapContext(req);
+    mapId = resolved.mapId;
+    map = resolved.map;
+  } catch (error) {
+    if (error instanceof MapContextError) {
+      return NextResponse.json({ error: error.message }, { status: error.status });
+    }
+    return NextResponse.json({ error: "Failed to resolve map context" }, { status: 500 });
+  }
+
   const { z: zStr, x: xStr, y: yStr } = await params;
-  const z = Number(zStr), x = Number(xStr), y = Number(yStr);
-  
-  console.log(`🗑️ DELETE request for tile z:${z} x:${x} y:${y}`);
-  
+  const z = Number(zStr);
+  const x = Number(xStr);
+  const y = Number(yStr);
+
   if (z !== ZMAX) {
     return NextResponse.json({ error: "Only max zoom tiles can be deleted" }, { status: 400 });
   }
+  if (!isTileInBounds(map, z, x, y)) {
+    return NextResponse.json({ error: "Tile is outside map bounds" }, { status: 400 });
+  }
 
   try {
-    // Delete the tile file
-    const path = tilePath(z, x, y);
-    await fs.unlink(path).catch(() => {
-      console.log(`   File not found, may already be deleted`);
-    });
-    
-    // Update database to mark as empty
-    await db.updateTile(z, x, y, { status: "EMPTY", hash: undefined, contentVer: 0 });
-    
-    // Regenerate parent tiles up the chain in the background
+    const targetPath = tilePath(mapId, z, x, y);
+    await fs.unlink(targetPath).catch(() => {});
+    await db.updateTile(mapId, z, x, y, { status: "EMPTY", hash: undefined, contentVer: 0 });
+
     (async () => {
-      try {
-        let cz = z, cx = x, cy = y;
-        while (cz > 0) {
-          const p = parentOf(cz, cx, cy);
-          // If any child exists, rebuild the parent; otherwise remove parent and mark EMPTY
-          const kids = childrenOf(p.z, p.x, p.y);
-          const buffers = await Promise.all(kids.map(k => fs.readFile(tilePath(k.z,k.x,k.y)).catch(() => null)));
-          const hasAnyChild = buffers.some(b => b !== null);
-          if (hasAnyChild) {
-            await generateParentTile(p.z, p.x, p.y);
-          } else {
-            const pPath = tilePath(p.z, p.x, p.y);
-            await fs.unlink(pPath).catch(() => {});
-            await db.updateTile(p.z, p.x, p.y, { status: "EMPTY", hash: undefined, contentVer: 0 });
-          }
-          cz = p.z; cx = p.x; cy = p.y;
+      let cz = z;
+      let cx = x;
+      let cy = y;
+      while (cz > 0) {
+        const p = parentOf(cz, cx, cy);
+        const kids = childrenOf(p.z, p.x, p.y);
+        const buffers = await Promise.all(
+          kids.map((child) => fs.readFile(tilePath(mapId, child.z, child.x, child.y)).catch(() => null)),
+        );
+        const hasAnyChild = buffers.some((buf) => buf !== null);
+        if (hasAnyChild) {
+          await generateParentTile(mapId, p.z, p.x, p.y);
+        } else {
+          await fs.unlink(tilePath(mapId, p.z, p.x, p.y)).catch(() => {});
+          await db.updateTile(mapId, p.z, p.x, p.y, { status: "EMPTY", hash: undefined, contentVer: 0 });
         }
-      } catch (err) {
-        console.error(`   ⚠️ Error regenerating parents after delete ${z}/${x}/${y}:`, err);
+        cz = p.z;
+        cx = p.x;
+        cy = p.y;
       }
-    })().catch(() => {});
-    
-    console.log(`   ✅ Tile deleted successfully`);
+    })().catch((err) => console.error(`Error regenerating parents after delete ${z}/${x}/${y}:`, err));
+
     return NextResponse.json({ ok: true, message: "Tile deleted" });
   } catch (error) {
-    console.error(`Failed to delete tile ${z}/${x}/${y}:`, error);
-    return NextResponse.json({ 
-      error: "Failed to delete tile", 
-      details: error instanceof Error ? error.message : "Unknown error" 
-    }, { status: 500 });
+    return NextResponse.json(
+      { error: "Failed to delete tile", details: error instanceof Error ? error.message : "Unknown error" },
+      { status: 500 },
+    );
   }
 }

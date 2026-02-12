@@ -1,6 +1,7 @@
 import type { ModelVariant } from "../modelVariant";
 
 export interface TileGenerationJobPayload {
+  mapId: string;
   z: number;
   x: number;
   y: number;

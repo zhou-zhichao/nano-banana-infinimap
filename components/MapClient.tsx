@@ -1,23 +1,37 @@
 "use client";
+
 import "leaflet/dist/leaflet.css";
-import { useEffect, useRef, useState, useCallback } from "react";
-import { useRouter, useSearchParams as useSearchParamsHook } from "next/navigation";
 import dynamic from "next/dynamic";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useSearchParams as useSearchParamsHook } from "next/navigation";
 
 const TileControls = dynamic(() => import("./TileControls"), { ssr: false });
-
 const MAX_Z = Number(process.env.NEXT_PUBLIC_ZMAX ?? 8);
 
-export default function MapClient() {
-  const ref = useRef<HTMLDivElement>(null);
-  const [map, setMap] = useState<any>(null);
-  const [hoveredTile, setHoveredTile] = useState<{ x: number; y: number; screenX: number; screenY: number } | null>(null);
-  const [selectedTile, setSelectedTile] = useState<{ x: number; y: number; screenX: number; screenY: number } | null>(null);
-  const selectedTileRef = useRef<typeof selectedTile>(null);
+type Props = {
+  mapId: string;
+  mapWidth: number;
+  mapHeight: number;
+};
+
+type TilePoint = { x: number; y: number; screenX: number; screenY: number };
+
+function withMapId(path: string, mapId: string) {
+  const separator = path.includes("?") ? "&" : "?";
+  return `${path}${separator}mapId=${encodeURIComponent(mapId)}`;
+}
+
+export default function MapClient({ mapId, mapWidth, mapHeight }: Props) {
+  const mapElementRef = useRef<HTMLDivElement>(null);
+  const mapRef = useRef<any>(null);
+  const [hoveredTile, setHoveredTile] = useState<TilePoint | null>(null);
+  const hoveredTileRef = useRef<TilePoint | null>(null);
+  const [selectedTile, setSelectedTile] = useState<TilePoint | null>(null);
+  const selectedTileRef = useRef<TilePoint | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const suppressOpenUntil = useRef<number>(0);
   const [tileExists, setTileExists] = useState<Record<string, boolean>>({});
-  const router = useRouter();
+  const tileExistsRef = useRef<Record<string, boolean>>({});
   const searchParams = useSearchParamsHook();
   const updateTimeoutRef = useRef<any>(undefined);
 
@@ -25,396 +39,334 @@ export default function MapClient() {
     selectedTileRef.current = selectedTile;
   }, [selectedTile]);
 
-  // Close menu when clicking anywhere outside of it
   useEffect(() => {
-    const onPointerDown = (e: PointerEvent) => {
+    hoveredTileRef.current = hoveredTile;
+  }, [hoveredTile]);
+
+  useEffect(() => {
+    tileExistsRef.current = tileExists;
+  }, [tileExists]);
+
+  const isMaxZoomTileInBounds = useCallback(
+    (x: number, y: number) => x >= 0 && y >= 0 && x < mapWidth && y < mapHeight,
+    [mapHeight, mapWidth],
+  );
+
+  const updateURL = useCallback(
+    (mapInstance: any) => {
+      if (updateTimeoutRef.current) {
+        clearTimeout(updateTimeoutRef.current);
+      }
+      updateTimeoutRef.current = window.setTimeout(() => {
+        const center = mapInstance.getCenter();
+        const zoom = mapInstance.getZoom();
+        const params = new URLSearchParams(window.location.search);
+        params.set("mapId", mapId);
+        params.set("z", String(zoom));
+        params.set("lat", center.lat.toFixed(6));
+        params.set("lng", center.lng.toFixed(6));
+        window.history.replaceState({}, "", `${window.location.pathname}?${params.toString()}`);
+      }, 250);
+    },
+    [mapId],
+  );
+
+  const checkTileExists = useCallback(
+    async (x: number, y: number) => {
+      if (!isMaxZoomTileInBounds(x, y)) return false;
+      try {
+        const response = await fetch(withMapId(`/api/meta/${MAX_Z}/${x}/${y}`, mapId));
+        const data = await response.json();
+        const exists = data.status === "READY";
+        setTileExists((prev) => ({ ...prev, [`${x},${y}`]: exists }));
+        return exists;
+      } catch {
+        return false;
+      }
+    },
+    [isMaxZoomTileInBounds, mapId],
+  );
+
+  const refreshVisibleTiles = useCallback(async () => {
+    const mapInstance = mapRef.current;
+    if (!mapInstance) return;
+    const tileLayer = mapInstance?._tileLayer;
+    const ts = Date.now();
+    const nextUrl = withMapId(`/api/tiles/{z}/{x}/{y}?v=${ts}`, mapId);
+
+    if (tileLayer?.setUrl) {
+      tileLayer.setUrl(nextUrl);
+      return;
+    }
+
+    if (!tileLayer) return;
+    const L = await import("leaflet");
+    mapInstance.removeLayer(tileLayer);
+    const nextLayer = L.tileLayer(nextUrl, {
+      tileSize: 256,
+      minZoom: 0,
+      maxZoom: MAX_Z,
+      noWrap: true,
+      updateWhenIdle: false,
+      updateWhenZooming: false,
+      keepBuffer: 0,
+    });
+    nextLayer.addTo(mapInstance);
+    mapInstance._tileLayer = nextLayer;
+  }, [mapId]);
+
+  const pollTileStatus = useCallback(
+    async (mapInstance: any, L: any, x: number, y: number) => {
+      let attempts = 0;
+      const maxAttempts = 30;
+      while (attempts < maxAttempts) {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        const response = await fetch(withMapId(`/api/meta/${MAX_Z}/${x}/${y}`, mapId)).catch(() => null);
+        if (!response) {
+          attempts += 1;
+          continue;
+        }
+        const data = await response.json().catch(() => null);
+        if (data?.status === "READY") {
+          const tileLayer = mapInstance?._tileLayer;
+          if (tileLayer?.setUrl) {
+            tileLayer.setUrl(withMapId(`/api/tiles/{z}/{x}/{y}?v=${Date.now()}`, mapId));
+          } else if (tileLayer) {
+            mapInstance.removeLayer(tileLayer);
+            const nextLayer = L.tileLayer(withMapId(`/api/tiles/{z}/{x}/{y}?v=${Date.now()}`, mapId), {
+              tileSize: 256,
+              minZoom: 0,
+              maxZoom: MAX_Z,
+              noWrap: true,
+              updateWhenIdle: false,
+              updateWhenZooming: false,
+              keepBuffer: 0,
+            });
+            nextLayer.addTo(mapInstance);
+            mapInstance._tileLayer = nextLayer;
+          }
+          return;
+        }
+        attempts += 1;
+      }
+    },
+    [mapId],
+  );
+
+  const handleGenerate = useCallback(
+    async (x: number, y: number, prompt: string) => {
+      const response = await fetch(withMapId(`/api/claim/${MAX_Z}/${x}/${y}`, mapId), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt }),
+      });
+      if (!response.ok) {
+        throw new Error("Failed to generate tile");
+      }
+      setTileExists((prev) => ({ ...prev, [`${x},${y}`]: true }));
+      const mapInstance = mapRef.current;
+      if (mapInstance) {
+        const L = await import("leaflet");
+        void pollTileStatus(mapInstance, L, x, y);
+      }
+    },
+    [mapId, pollTileStatus],
+  );
+
+  const handleRegenerate = useCallback(
+    async (x: number, y: number, prompt: string) => {
+      const response = await fetch(withMapId(`/api/invalidate/${MAX_Z}/${x}/${y}`, mapId), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt }),
+      });
+      if (!response.ok) {
+        throw new Error("Failed to regenerate tile");
+      }
+      const mapInstance = mapRef.current;
+      if (mapInstance) {
+        const L = await import("leaflet");
+        void pollTileStatus(mapInstance, L, x, y);
+      }
+    },
+    [mapId, pollTileStatus],
+  );
+
+  const handleDelete = useCallback(
+    async (x: number, y: number) => {
+      const response = await fetch(withMapId(`/api/delete/${MAX_Z}/${x}/${y}`, mapId), { method: "DELETE" });
+      if (!response.ok) {
+        throw new Error("Failed to delete tile");
+      }
+      setTileExists((prev) => ({ ...prev, [`${x},${y}`]: false }));
+      await refreshVisibleTiles();
+    },
+    [mapId, refreshVisibleTiles],
+  );
+
+  useEffect(() => {
+    const onPointerDown = (event: PointerEvent) => {
       if (!selectedTileRef.current) return;
-      // Ignore clicks inside modal/dialog or Radix popper portals.
-      const target = e.target as HTMLElement | null;
+      const target = event.target as HTMLElement | null;
       if (
         target &&
-        (
-          target.closest('[data-dialog-root]') ||
-          target.closest('[data-radix-popper-content-wrapper]') ||
-          target.closest('[role="dialog"]')
-        )
-      ) return;
-      if (menuRef.current && menuRef.current.contains(e.target as Node)) return;
+        (target.closest("[data-dialog-root]") ||
+          target.closest("[data-radix-popper-content-wrapper]") ||
+          target.closest('[role="dialog"]'))
+      ) {
+        return;
+      }
+      if (menuRef.current && menuRef.current.contains(event.target as Node)) return;
       setSelectedTile(null);
       selectedTileRef.current = null;
-      // Prevent the same click from immediately re-opening via map click
       suppressOpenUntil.current = performance.now() + 250;
     };
-    document.addEventListener('pointerdown', onPointerDown, true);
-    return () => document.removeEventListener('pointerdown', onPointerDown, true);
+    document.addEventListener("pointerdown", onPointerDown, true);
+    return () => document.removeEventListener("pointerdown", onPointerDown, true);
   }, []);
-
-  // Update URL with debouncing
-  const updateURL = useCallback((m: any) => {
-    if (updateTimeoutRef.current) {
-      clearTimeout(updateTimeoutRef.current);
-    }
-    
-    updateTimeoutRef.current = window.setTimeout(() => {
-      const center = m.getCenter();
-      const zoom = m.getZoom();
-      const params = new URLSearchParams();
-      params.set('z', zoom.toString());
-      params.set('lat', center.lat.toFixed(6));
-      params.set('lng', center.lng.toFixed(6));
-      
-      // Update URL without triggering navigation
-      const newURL = `${window.location.pathname}?${params.toString()}`;
-      window.history.replaceState({}, '', newURL);
-    }, 300); // Debounce for 300ms
-  }, []);
-
-  // Check if a tile exists
-  const checkTileExists = useCallback(async (x: number, y: number) => {
-    try {
-      const response = await fetch(`/api/meta/${MAX_Z}/${x}/${y}`);
-      const data = await response.json();
-      const exists = data.status === "READY";
-      setTileExists(prev => ({ ...prev, [`${x},${y}`]: exists }));
-      return exists;
-    } catch {
-      return false;
-    }
-  }, []);
-
-  // Handle tile generation
-  const handleGenerate = useCallback(async (x: number, y: number, prompt: string) => {
-    try {
-      const response = await fetch(`/api/claim/${MAX_Z}/${x}/${y}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt })
-      });
-      
-      if (response.ok) {
-        // Start polling for completion
-        if (map) {
-          import('leaflet').then((L) => {
-            pollTileStatus(x, y, map, L);
-          });
-        }
-        setTileExists(prev => ({ ...prev, [`${x},${y}`]: true }));
-      }
-    } catch (error) {
-      console.error("Failed to generate tile:", error);
-      throw error;
-    }
-  }, [map]);
-
-  // Handle tile regeneration
-  const handleRegenerate = useCallback(async (x: number, y: number, prompt: string) => {
-    try {
-      const response = await fetch(`/api/invalidate/${MAX_Z}/${x}/${y}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt })
-      });
-      
-      if (response.ok) {
-        // Start polling for completion
-        if (map) {
-          import('leaflet').then((L) => {
-            pollTileStatus(x, y, map, L);
-          });
-        }
-      }
-    } catch (error) {
-      console.error("Failed to regenerate tile:", error);
-      throw error;
-    }
-  }, [map]);
-
-  // Handle tile deletion
-  const handleDelete = useCallback(async (x: number, y: number) => {
-    try {
-      const response = await fetch(`/api/delete/${MAX_Z}/${x}/${y}`, {
-        method: "DELETE"
-      });
-      
-      if (response.ok) {
-        await refreshVisibleTiles();
-        setTileExists(prev => ({ ...prev, [`${x},${y}`]: false }));
-      }
-    } catch (error) {
-      console.error("Failed to delete tile:", error);
-      throw error;
-    }
-  }, [map]);
-
-  // Refresh currently visible tiles with a cache-busting URL template.
-  const refreshVisibleTiles = useCallback(async () => {
-    if (!map) return;
-    const tileLayer = (map as any)?._tileLayer;
-    const ts = Date.now();
-    if (tileLayer?.setUrl) {
-      tileLayer.setUrl(`/api/tiles/{z}/{x}/{y}?v=${ts}`);
-    } else if (tileLayer) {
-      const L = await import('leaflet');
-      (map as any).removeLayer(tileLayer);
-      const newTileLayer = L.tileLayer(`/api/tiles/{z}/{x}/{y}?v=${ts}`, { 
-        tileSize: 256, 
-        minZoom: 0, 
-        maxZoom: MAX_Z, 
-        noWrap: true,
-        updateWhenIdle: false,
-        updateWhenZooming: false,
-        keepBuffer: 0
-      });
-      newTileLayer.addTo(map as any);
-      (map as any)._tileLayer = newTileLayer;
-    }
-  }, [map]);
 
   useEffect(() => {
-    if (!ref.current || map) return;
-    
-    // Dynamic import for Leaflet to avoid SSR issues
-    import('leaflet').then((L) => {
-      // Parse initial position from URL
-      const initialZoom = searchParams?.get('z') ? parseInt(searchParams.get('z')!) : 2;
-      const initialLat = searchParams?.get('lat') ? parseFloat(searchParams.get('lat')!) : null;
-      const initialLng = searchParams?.get('lng') ? parseFloat(searchParams.get('lng')!) : null;
-      
-      const m = L.map(ref.current!, { 
-        crs: L.CRS.Simple, 
-        minZoom: 0, 
-        maxZoom: MAX_Z,
-        zoom: initialZoom
-      });
-      
-      const world = (1 << MAX_Z) * 256;
-      const sw = m.unproject([0, world] as any, MAX_Z);
-      const ne = m.unproject([world, 0] as any, MAX_Z);
-      const bounds = new L.LatLngBounds(sw, ne);
-      m.setMaxBounds(bounds);
-      
-      // Set initial view
-      if (initialLat !== null && initialLng !== null) {
-        m.setView([initialLat, initialLng], initialZoom);
-      } else {
-        m.fitBounds(bounds);
-      }
+    if (!mapElementRef.current || mapRef.current) return;
 
-      // Add timestamp to force fresh tiles on page load
-      const tileLayer = L.tileLayer(`/api/tiles/{z}/{x}/{y}?v=${Date.now()}`, { 
-        tileSize: 256, 
-        minZoom: 0, 
-        maxZoom: MAX_Z, 
+    let cancelled = false;
+    void import("leaflet").then((L) => {
+      if (cancelled || !mapElementRef.current) return;
+
+      const initialZoom = searchParams?.get("z") ? Number(searchParams.get("z")) : 2;
+      const initialLat = searchParams?.get("lat") ? Number(searchParams.get("lat")) : null;
+      const initialLng = searchParams?.get("lng") ? Number(searchParams.get("lng")) : null;
+
+      const mapInstance: any = L.map(mapElementRef.current, {
+        crs: L.CRS.Simple,
+        minZoom: 0,
+        maxZoom: MAX_Z,
+        zoom: initialZoom,
+      });
+      mapRef.current = mapInstance;
+
+      const worldWidth = mapWidth * 256;
+      const worldHeight = mapHeight * 256;
+      const southWest = mapInstance.unproject([0, worldHeight] as any, MAX_Z);
+      const northEast = mapInstance.unproject([worldWidth, 0] as any, MAX_Z);
+      const bounds = new L.LatLngBounds(southWest, northEast);
+      mapInstance.setMaxBounds(bounds);
+
+      if (initialLat != null && initialLng != null) mapInstance.setView([initialLat, initialLng], initialZoom);
+      else mapInstance.fitBounds(bounds);
+
+      const url = withMapId(`/api/tiles/{z}/{x}/{y}?v=${Date.now()}`, mapId);
+      const tileLayer = L.tileLayer(url, {
+        tileSize: 256,
+        minZoom: 0,
+        maxZoom: MAX_Z,
         noWrap: true,
         updateWhenIdle: false,
         updateWhenZooming: false,
-        keepBuffer: 0
+        keepBuffer: 0,
       });
-      tileLayer.addTo(m);
-      
-      // Store reference for refresh
-      (m as any)._tileLayer = tileLayer;
+      tileLayer.addTo(mapInstance);
+      mapInstance._tileLayer = tileLayer;
 
-      // Update URL when map moves
-      m.on('moveend', () => updateURL(m));
-      m.on('zoomend', () => updateURL(m));
+      mapInstance.on("moveend", () => updateURL(mapInstance));
+      mapInstance.on("zoomend", () => updateURL(mapInstance));
 
-      // Keep selected tile menu positioned correctly while moving/zooming
       const updateSelectedPosition = () => {
         const current = selectedTileRef.current;
         if (!current) return;
         const tileCenterWorld = L.point((current.x + 0.5) * 256, (current.y + 0.5) * 256);
-        const tileCenterLatLng = m.unproject(tileCenterWorld, m.getZoom());
-        const tileCenterScreen = m.latLngToContainerPoint(tileCenterLatLng);
-        setSelectedTile(prev => prev ? ({ ...prev, screenX: tileCenterScreen.x, screenY: tileCenterScreen.y }) : prev);
+        const tileCenterLatLng = mapInstance.unproject(tileCenterWorld, mapInstance.getZoom());
+        const tileCenterScreen = mapInstance.latLngToContainerPoint(tileCenterLatLng);
+        setSelectedTile((prev) => (prev ? { ...prev, screenX: tileCenterScreen.x, screenY: tileCenterScreen.y } : prev));
       };
-      m.on('move', updateSelectedPosition);
-      m.on('zoomend', updateSelectedPosition);
+      mapInstance.on("move", updateSelectedPosition);
+      mapInstance.on("zoomend", updateSelectedPosition);
 
-      // Track mouse hover over tiles
-      m.on("mousemove", async (e: any) => {
-        if (m.getZoom() !== m.getMaxZoom()) {
+      mapInstance.on("mousemove", (event: any) => {
+        if (mapInstance.getZoom() !== mapInstance.getMaxZoom()) {
           setHoveredTile(null);
-          // Reset cursor when not interactive
-          m.getContainer().style.cursor = '';
+          mapInstance.getContainer().style.cursor = "";
           return;
         }
-        
-        const p = m.project(e.latlng, m.getZoom());
-        const x = Math.floor(p.x / 256);
-        const y = Math.floor(p.y / 256);
-        
-        // Update hovered tile if changed
-        if (!hoveredTile || hoveredTile.x !== x || hoveredTile.y !== y) {
-          // Calculate the center of the tile
-          const tileCenterWorld = L.point((x + 0.5) * 256, (y + 0.5) * 256);
-          const tileCenterLatLng = m.unproject(tileCenterWorld, m.getZoom());
-          const tileCenterScreen = m.latLngToContainerPoint(tileCenterLatLng);
-          
-          setHoveredTile({ 
-            x, 
-            y, 
-            screenX: tileCenterScreen.x,
-            screenY: tileCenterScreen.y
-          });
 
-          // Indicate clickable area via cursor
-          m.getContainer().style.cursor = 'pointer';
-          
-          // Check if tile exists
+        const projected = mapInstance.project(event.latlng, mapInstance.getZoom());
+        const x = Math.floor(projected.x / 256);
+        const y = Math.floor(projected.y / 256);
+        if (!isMaxZoomTileInBounds(x, y)) {
+          setHoveredTile(null);
+          mapInstance.getContainer().style.cursor = "";
+          return;
+        }
+
+        const currentHovered = hoveredTileRef.current;
+        if (!currentHovered || currentHovered.x !== x || currentHovered.y !== y) {
+          const tileCenterWorld = L.point((x + 0.5) * 256, (y + 0.5) * 256);
+          const tileCenterLatLng = mapInstance.unproject(tileCenterWorld, mapInstance.getZoom());
+          const tileCenterScreen = mapInstance.latLngToContainerPoint(tileCenterLatLng);
+          setHoveredTile({ x, y, screenX: tileCenterScreen.x, screenY: tileCenterScreen.y });
+          mapInstance.getContainer().style.cursor = "pointer";
           const key = `${x},${y}`;
-          if (!(key in tileExists)) {
-            checkTileExists(x, y);
-          }
+          if (!(key in tileExistsRef.current)) void checkTileExists(x, y);
         }
       });
 
-      m.on("mouseleave", () => {
+      mapInstance.on("mouseleave", () => {
         setHoveredTile(null);
-        // Reset cursor when leaving the map
-        m.getContainer().style.cursor = '';
+        mapInstance.getContainer().style.cursor = "";
       });
 
-      m.on("zoomstart", () => {
+      mapInstance.on("zoomstart", () => {
         setHoveredTile(null);
         setSelectedTile(null);
       });
 
-      // Open menu on click at max zoom without breaking drag
-      m.on('click', (e: any) => {
-        if (m.getZoom() !== m.getMaxZoom()) {
-          return;
-        }
-        // If a menu is already open, close it instead of opening another
+      mapInstance.on("click", (event: any) => {
+        if (mapInstance.getZoom() !== mapInstance.getMaxZoom()) return;
+        if (performance.now() < suppressOpenUntil.current) return;
+
+        const projected = mapInstance.project(event.latlng, mapInstance.getZoom());
+        const x = Math.floor(projected.x / 256);
+        const y = Math.floor(projected.y / 256);
+        if (!isMaxZoomTileInBounds(x, y)) return;
+
         if (selectedTileRef.current) {
           setSelectedTile(null);
           selectedTileRef.current = null;
-          // Also update hover tile to current click position so the highlight can show
-          const pNow = m.project(e.latlng, m.getZoom());
-          const hx = Math.floor(pNow.x / 256);
-          const hy = Math.floor(pNow.y / 256);
-          const centerWorld = L.point((hx + 0.5) * 256, (hy + 0.5) * 256);
-          const centerLatLng = m.unproject(centerWorld, m.getZoom());
-          const centerScreen = m.latLngToContainerPoint(centerLatLng);
-          setHoveredTile({ x: hx, y: hy, screenX: centerScreen.x, screenY: centerScreen.y });
           return;
         }
-        // Respect suppression window set by outside clicks
-        if (performance.now() < suppressOpenUntil.current) {
-          return;
-        }
-        const p = m.project(e.latlng, m.getZoom());
-        const x = Math.floor(p.x / 256);
-        const y = Math.floor(p.y / 256);
-        const tileCenterWorld = L.point((x + 0.5) * 256, (y + 0.5) * 256);
-        const tileCenterLatLng = m.unproject(tileCenterWorld, m.getZoom());
-        const tileCenterScreen = m.latLngToContainerPoint(tileCenterLatLng);
-        setSelectedTile({ x, y, screenX: tileCenterScreen.x, screenY: tileCenterScreen.y });
 
+        const tileCenterWorld = L.point((x + 0.5) * 256, (y + 0.5) * 256);
+        const tileCenterLatLng = mapInstance.unproject(tileCenterWorld, mapInstance.getZoom());
+        const tileCenterScreen = mapInstance.latLngToContainerPoint(tileCenterLatLng);
+        setSelectedTile({ x, y, screenX: tileCenterScreen.x, screenY: tileCenterScreen.y });
         const key = `${x},${y}`;
-        if (!(key in tileExists)) {
-          checkTileExists(x, y);
-        }
+        if (!(key in tileExistsRef.current)) void checkTileExists(x, y);
       });
 
-      setMap(m);
-      
-      // Set initial URL if not already set
-      if (!searchParams.get('z')) {
-        updateURL(m);
-      }
+      if (!searchParams?.get("z")) updateURL(mapInstance);
     });
-  }, [map, searchParams, updateURL, hoveredTile, tileExists, checkTileExists]);
 
-  // Poll for tile generation completion
-  const pollTileStatus = async (x: number, y: number, m: any, L: any) => {
-    let attempts = 0;
-    const maxAttempts = 30; // Poll for up to 30 seconds
-    
-    const checkStatus = async () => {
-      try {
-        const response = await fetch(`/api/meta/${MAX_Z}/${x}/${y}`);
-        const data = await response.json();
-        
-        if (data.status === "READY") {
-          console.log(`Tile ready at ${MAX_Z}/${x}/${y}, refreshing...`);
-          
-          // Get the tile layer
-          const tileLayer = (m as any)._tileLayer;
-          if (tileLayer) {
-            // Debug: log all tile keys to find the right format
-            if (tileLayer._tiles) {
-              console.log('Current tile keys:', Object.keys(tileLayer._tiles));
-            }
-            
-            // Try different key formats
-            const keys = [
-              `${x}:${y}:${MAX_Z}`,
-              `${MAX_Z}:${x}:${y}`,
-              `${x}_${y}_${MAX_Z}`,
-              `${MAX_Z}_${x}_${y}`
-            ];
-            
-            let tileFound = false;
-            for (const key of keys) {
-              if (tileLayer._tiles && tileLayer._tiles[key]) {
-                const tileEl = tileLayer._tiles[key].el;
-                if (tileEl && tileEl.src) {
-                  // Force reload with cache buster
-                  tileEl.src = `/api/tiles/${MAX_Z}/${x}/${y}?t=${Date.now()}`;
-                  console.log(`Updated tile src with key ${key}: ${tileEl.src}`);
-                  tileFound = true;
-                  break;
-                }
-              }
-            }
-            
-            if (!tileFound) {
-              console.log(`Tile not found in DOM, forcing full redraw`);
-              // Remove and re-add the layer with new timestamp
-              m.removeLayer(tileLayer);
-              const newTileLayer = L.tileLayer(`/api/tiles/{z}/{x}/{y}?v=${Date.now()}`, { 
-                tileSize: 256, 
-                minZoom: 0, 
-                maxZoom: MAX_Z, 
-                noWrap: true,
-                updateWhenIdle: false,
-                updateWhenZooming: false,
-                keepBuffer: 0
-              });
-              newTileLayer.addTo(m);
-              (m as any)._tileLayer = newTileLayer;
-            }
-          }
-        } else if (data.status === "PENDING" && attempts < maxAttempts) {
-          attempts++;
-          setTimeout(checkStatus, 1000); // Check again in 1 second
-        }
-      } catch (error) {
-        console.error("Error checking tile status:", error);
+    return () => {
+      cancelled = true;
+      if (updateTimeoutRef.current) clearTimeout(updateTimeoutRef.current);
+      if (mapRef.current) {
+        mapRef.current.remove();
+        mapRef.current = null;
       }
     };
-    
-    setTimeout(checkStatus, 1000); // Start checking after 1 second
-  };
+  }, [checkTileExists, isMaxZoomTileInBounds, mapHeight, mapId, mapWidth, searchParams, updateURL]);
 
   return (
     <div className="w-full h-full relative">
       <div className="p-3 z-10 absolute top-2 left-2 bg-white/90 rounded-xl shadow-lg flex flex-col gap-2">
         <div className="text-sm text-gray-600">
-          {map && map.getZoom() === MAX_Z ? 
-            "Hover to highlight, click to open menu" : 
-            "Zoom to max level to interact with tiles"}
+          {mapRef.current && mapRef.current.getZoom() === MAX_Z ? "Hover to highlight, click to open menu" : "Zoom to max level"}
         </div>
-        {searchParams.get('z') && (
-          <div className="text-xs text-gray-400">
-            Position: z={searchParams.get('z')}, lat={searchParams.get('lat')}, lng={searchParams.get('lng')}
-          </div>
-        )}
+        <div className="text-xs text-gray-400">
+          map={mapId} size={mapWidth}x{mapHeight}
+        </div>
       </div>
-      
-      {/* Hover highlight at max zoom (visual only, non-interactive) */}
-      {hoveredTile && !selectedTile && map && map.getZoom() === MAX_Z && (
+
+      {hoveredTile && !selectedTile && mapRef.current && mapRef.current.getZoom() === MAX_Z && (
         <div
           className="absolute"
           style={{
@@ -422,34 +374,29 @@ export default function MapClient() {
             top: hoveredTile.screenY - 128,
             width: 256,
             height: 256,
-            background: 'rgba(255,255,255,0.1)',
-            pointerEvents: 'none',
+            background: "rgba(255,255,255,0.12)",
+            pointerEvents: "none",
             zIndex: 1000,
           }}
         />
       )}
 
-      {/* Tile menu shown on click */}
-      {selectedTile && map && map.getZoom() === MAX_Z && (
+      {selectedTile && mapRef.current && mapRef.current.getZoom() === MAX_Z && (
         <div
           className="absolute pointer-events-none"
-          style={{
-            left: selectedTile.screenX,
-            top: selectedTile.screenY,
-            transform: 'translate(-50%, -50%)',
-            zIndex: 500,
-          }}
+          style={{ left: selectedTile.screenX, top: selectedTile.screenY, transform: "translate(-50%, -50%)", zIndex: 500 }}
         >
           <div
             ref={menuRef}
             className="pointer-events-auto bg-white rounded-lg shadow-xl p-2 border border-gray-200"
-            onMouseDown={(e) => e.stopPropagation()}
-            onClick={(e) => e.stopPropagation()}
+            onMouseDown={(event) => event.stopPropagation()}
+            onClick={(event) => event.stopPropagation()}
           >
             <div className="text-xs text-gray-500 mb-1">
               Tile ({selectedTile.x}, {selectedTile.y})
             </div>
             <TileControls
+              mapId={mapId}
               x={selectedTile.x}
               y={selectedTile.y}
               z={MAX_Z}
@@ -458,19 +405,17 @@ export default function MapClient() {
               onRegenerate={(prompt) => handleRegenerate(selectedTile.x, selectedTile.y, prompt)}
               onDelete={() => handleDelete(selectedTile.x, selectedTile.y)}
               onRefreshTiles={() => {
-                // Delay a moment to ensure filesystem flush and ETag update.
-                setTimeout(() => { 
+                setTimeout(() => {
                   void refreshVisibleTiles();
-                  setTileExists(prev => ({ ...prev, [`${selectedTile.x},${selectedTile.y}`]: true }));
+                  setTileExists((prev) => ({ ...prev, [`${selectedTile.x},${selectedTile.y}`]: true }));
                 }, 50);
               }}
-              
             />
           </div>
         </div>
       )}
-      
-      <div ref={ref} className="w-full h-full" />
+
+      <div ref={mapElementRef} className="w-full h-full" />
     </div>
   );
 }

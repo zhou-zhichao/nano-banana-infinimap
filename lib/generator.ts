@@ -52,10 +52,10 @@ type GenerationOptions = {
   modelVariant?: ModelVariant;
 };
 
-async function getNeighbors(z: number, x: number, y: number) {
+async function getNeighbors(mapId: string, z: number, x: number, y: number) {
   const out: { dir: NeighborDir; buf: Buffer | null }[] = [];
   for (const [dir, dx, dy] of dirs) {
-    out.push({ dir, buf: await readTileFile(z, x + dx, y + dy) });
+    out.push({ dir, buf: await readTileFile(mapId, z, x + dx, y + dy) });
   }
   return out;
 }
@@ -188,6 +188,7 @@ function edgeRect(dir: NeighborDir): string {
 
 /** Generate a tile preview without saving to disk */
 export async function generateTilePreview(
+  mapId: string,
   z: number,
   x: number,
   y: number,
@@ -204,7 +205,7 @@ export async function generateTilePreview(
   const requestedModel = resolveVertexModelForVariant(modelVariant);
   const seedHex = blake2sHex(Buffer.from(`${z}:${x}:${y}:${styleName}:${prompt}:${modelVariant}`)).slice(0, 8);
 
-  const neighbors = await getNeighbors(z, x, y);
+  const neighbors = await getNeighbors(mapId, z, x, y);
   const buf = await runModel({ prompt, styleName, neighbors, seedHex, modelVariant, requestedModel });
 
   console.log(`  Tile preview generated for z:${z} x:${x} y:${y}\n`);
@@ -216,6 +217,7 @@ export async function generateTilePreview(
  * the model's predicted content for the neighborhood.
  */
 export async function generateGridPreview(
+  mapId: string,
   z: number,
   x: number,
   y: number,
@@ -228,7 +230,7 @@ export async function generateGridPreview(
   const modelVariant = options?.modelVariant ?? DEFAULT_MODEL_VARIANT;
   const requestedModel = resolveVertexModelForVariant(modelVariant);
   const seedHex = blake2sHex(Buffer.from(`${z}:${x}:${y}:${styleName}:${prompt}:${modelVariant}`)).slice(0, 8);
-  const neighbors = await getNeighbors(z, x, y);
+  const neighbors = await getNeighbors(mapId, z, x, y);
 
   try {
     const gridContext = await buildGridContextImage(neighbors);
@@ -294,6 +296,7 @@ export async function generateGridPreview(
 }
 
 export async function generateTile(
+  mapId: string,
   z: number,
   x: number,
   y: number,
@@ -305,7 +308,7 @@ export async function generateTile(
 
   if (z !== ZMAX) throw new Error("Generation only at max zoom");
 
-  const rec = await db.upsertTile({ z, x, y, status: "PENDING" });
+  const rec = await db.upsertTile(mapId, { z, x, y, status: "PENDING" });
   console.log("  Tile marked as PENDING");
 
   const { name: styleName } = await loadStyleControl();
@@ -313,7 +316,7 @@ export async function generateTile(
   const requestedModel = resolveVertexModelForVariant(modelVariant);
   const seedHex = blake2sHex(Buffer.from(`${z}:${x}:${y}:${styleName}:${prompt}:${modelVariant}`)).slice(0, 8);
 
-  const neighbors = await getNeighbors(z, x, y);
+  const neighbors = await getNeighbors(mapId, z, x, y);
   const buf = await runModel({ prompt, styleName, neighbors, seedHex, modelVariant, requestedModel });
 
   const bytesHash = blake2sHex(buf).slice(0, 16);
@@ -325,10 +328,10 @@ export async function generateTile(
     seed: seedHex,
   });
 
-  await writeTileFile(z, x, y, buf);
+  await writeTileFile(mapId, z, x, y, buf);
   console.log("  Tile file written to disk");
 
-  const updated = await db.updateTile(z, x, y, {
+  const updated = await db.updateTile(mapId, z, x, y, {
     status: "READY",
     hash,
     contentVer,
@@ -337,12 +340,12 @@ export async function generateTile(
   console.log(`  Tile marked as READY with hash: ${updated.hash}`);
   console.log(`  Tile generation complete for z:${z} x:${x} y:${y}\n`);
 
-  generateParentTilesForChild(z, x, y).catch((err) => console.error(`Failed to generate parent tiles: ${err}`));
+  generateParentTilesForChild(mapId, z, x, y).catch((err) => console.error(`Failed to generate parent tiles: ${err}`));
 
   return { hash: updated.hash!, contentVer: updated.contentVer! };
 }
 
-async function generateParentTilesForChild(z: number, x: number, y: number) {
+async function generateParentTilesForChild(mapId: string, z: number, x: number, y: number) {
   const { generateParentTile } = await import("./parentTiles");
   const { parentOf } = await import("./coords");
 
@@ -354,7 +357,7 @@ async function generateParentTilesForChild(z: number, x: number, y: number) {
 
   while (currentZ > 0) {
     const parent = parentOf(currentZ, currentX, currentY);
-    await generateParentTile(parent.z, parent.x, parent.y);
+    await generateParentTile(mapId, parent.z, parent.x, parent.y);
 
     currentZ = parent.z;
     currentX = parent.x;

@@ -11,10 +11,10 @@ export interface TileRecord {
 }
 
 export interface DB {
-  getTile(z:number,x:number,y:number): Promise<TileRecord | null>;
-  upsertTile(tr: Partial<TileRecord> & { z:number; x:number; y:number }): Promise<TileRecord>;
-  updateTile(z:number,x:number,y:number, patch: Partial<TileRecord>): Promise<TileRecord>;
-  getTiles(batch: {z:number,x:number,y:number}[]): Promise<TileRecord[]>;
+  getTile(mapId: string, z:number,x:number,y:number): Promise<TileRecord | null>;
+  upsertTile(mapId: string, tr: Partial<TileRecord> & { z:number; x:number; y:number }): Promise<TileRecord>;
+  updateTile(mapId: string, z:number,x:number,y:number, patch: Partial<TileRecord>): Promise<TileRecord>;
+  getTiles(mapId: string, batch: {z:number,x:number,y:number}[]): Promise<TileRecord[]>;
 }
 
 export function key(z:number,x:number,y:number) { return `${z}_${x}_${y}`; }

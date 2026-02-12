@@ -5,6 +5,7 @@ import * as Tooltip from "@radix-ui/react-tooltip";
 import { TileGenerateModal } from "./TileGenerateModal";
 
 interface TileControlsProps {
+  mapId: string;
   x: number;
   y: number;
   z: number;
@@ -15,7 +16,7 @@ interface TileControlsProps {
   onRefreshTiles?: () => void;
 }
 
-export default function TileControls({ x, y, z, exists, onGenerate, onRegenerate, onDelete, onRefreshTiles }: TileControlsProps) {
+export default function TileControls({ mapId, x, y, z, exists, onGenerate, onRegenerate, onDelete, onRefreshTiles }: TileControlsProps) {
   const [generateModalOpen, setGenerateModalOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -130,6 +131,7 @@ export default function TileControls({ x, y, z, exists, onGenerate, onRegenerate
       
       {/* Generate/Regenerate Modal */}
       <TileGenerateModal
+        mapId={mapId}
         open={generateModalOpen}
         onClose={() => setGenerateModalOpen(false)}
         x={x}

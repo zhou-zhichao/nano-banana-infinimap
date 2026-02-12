@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Import NASA Moon tiles into local .tiles as z_x_y.webp files.
+"""Import NASA Moon tiles into .tilemaps/presets/moon/tiles as z_x_y.webp files.
 
 Default source range:
   z=8, x=100..140, y=300..360
@@ -98,7 +98,7 @@ class RateLimiter:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Download NASA Moon tiles and save as local .tiles/{z}_{x}_{y}.webp"
+        description="Download NASA Moon tiles and save as .tilemaps/presets/moon/tiles/{z}_{x}_{y}.webp"
     )
     parser.add_argument("--z", type=int, default=8, help="Zoom level in source URL.")
     parser.add_argument("--x-min", type=int, default=100)
@@ -118,7 +118,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--jitter-ms", type=int, default=120)
     parser.add_argument("--max-retries", type=int, default=5)
     parser.add_argument("--timeout-ms", type=int, default=20000)
-    parser.add_argument("--overwrite", action="store_true", help="Overwrite existing .webp tiles.")
+    parser.add_argument("--overwrite", action="store_true", help="Overwrite existing .webp preset tiles.")
     parser.add_argument(
         "--generate-parents",
         dest="generate_parents",
@@ -160,7 +160,7 @@ def map_coords(src_x: int, src_y: int, args: argparse.Namespace) -> tuple[int, i
 
 
 def build_tasks(args: argparse.Namespace, repo_root: Path) -> list[TileTask]:
-    tile_dir = repo_root / ".tiles"
+    tile_dir = repo_root / ".tilemaps" / "presets" / "moon" / "tiles"
     tasks: list[TileTask] = []
     for sx in range(args.x_min, args.x_max + 1):
         for sy in range(args.y_min, args.y_max + 1):

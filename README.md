@@ -110,6 +110,25 @@ Open `http://localhost:3000`.
 
 This project now binds Next.js to `0.0.0.0` by default for `dev` and `start` (override with `NEXT_HOST` if needed).
 
+## Tilemaps (Multi-Map)
+
+- The app now supports multiple tilemaps with a left sidebar (`/map`).
+- Create new tilemaps from:
+  - `blank` (custom size `1..256` x `1..256`)
+  - `moon` (fixed index range `0..60 x 0..40`, actual `61x41` tiles)
+- Map selection is stored in URL via `?mapId=...`.
+
+Data layout:
+
+- `.tilemaps/presets/moon/tiles/` -> moon preset source tiles
+- `.tilemaps/maps/<mapId>/map.json` -> tilemap manifest
+- `.tilemaps/maps/<mapId>/tiles/` -> tile images
+- `.tilemaps/maps/<mapId>/meta/` -> tile metadata JSON
+- `.tilemaps/maps/<mapId>/locks/` -> lock files
+- `.tilemaps/maps/<mapId>/queue/` -> queue files
+
+On first bootstrap, legacy `.tiles` is migrated into moon preset tiles using `z_y_x -> z_x_y` conversion, then `default` is created from that preset.
+
 ## Public Internet Access + Password
 
 1. Set password protection in `.env.local`:
@@ -176,7 +195,7 @@ Expected result includes:
 
 ## Import NASA Moon Background Tiles
 
-This repo includes a Python tool for importing a NASA Moon tile range into local `.tiles/` so `lib/storage.ts` can read them directly.
+This repo includes a Python tool for importing a NASA Moon tile range into `.tilemaps/presets/moon/tiles/` for the built-in `moon` template.
 
 Default source range:
 - `z=8`
@@ -184,10 +203,10 @@ Default source range:
 - `y=300..360`
 
 Default behavior:
-- Saves to `.tiles/{z}_{x}_{y}.webp`
+- Saves to `.tilemaps/presets/moon/tiles/{z}_{x}_{y}.webp`
 - Uses `window-zero` mapping (`dstX=srcX-100`, `dstY=srcY-300`)
 - Uses moderate rate settings (`concurrency=4`, request spacing + jitter, retries on `429/5xx`)
-- Does not write max-zoom `.meta` records
+- Does not write tile metadata records
 - Runs parent regeneration (`scripts/regen-parents.cjs`) when new tiles were downloaded
 
 Run with defaults:
@@ -216,9 +235,9 @@ Useful flags:
 - `--max-retries`
 - `--timeout-ms`
 
-### Git LFS for `.tiles` (recommended)
+### Git LFS for moon preset tiles (recommended)
 
-If you want forks/clones to reuse the downloaded moon background tiles without re-crawling, store `.tiles/*.webp` in Git LFS.
+If you want forks/clones to reuse moon preset background tiles without re-crawling, store `.tilemaps/presets/moon/tiles/*.webp` in Git LFS.
 
 One-time setup:
 
@@ -234,4 +253,4 @@ git lfs pull
 ```
 
 CI note:
-- If your CI needs local `.tiles` files, enable LFS fetch in checkout; otherwise only pointer files are present.
+- If your CI needs local moon preset files, enable LFS fetch in checkout; otherwise only pointer files are present.

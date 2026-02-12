@@ -74,6 +74,7 @@ VERTEX_PROJECT_ID="lucid-formula-484716-e0"
 VERTEX_LOCATION="us-central1"
 VERTEX_AUTH_MODE="api_key"
 VERTEX_MODEL="gemini-2.5-flash-image"
+VERTEX_MODEL_PRO="gemini-3-pro-image-preview"
 VERTEX_MODEL_FALLBACKS=""
 VERTEX_RESPONSE_MODALITIES="IMAGE"
 VERTEX_IMAGE_SIZE="1K"
@@ -135,6 +136,8 @@ cloudflared tunnel --url http://127.0.0.1:3000
 Notes:
 - If `BASIC_AUTH_USER` or `BASIC_AUTH_PASSWORD` is empty, auth is disabled.
 - Use a strong password before exposing the service publicly.
+- In the Generate Preview modal, you can choose `Nano Banana` or `Nano Banana Pro` before generation.
+- `Nano Banana Pro` uses `VERTEX_MODEL_PRO` (default `gemini-3-pro-image-preview`), and will fall back to `VERTEX_MODEL`/fallback list if unavailable.
 
 ## Health Check
 

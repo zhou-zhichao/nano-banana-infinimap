@@ -7,6 +7,12 @@ import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import * as Tooltip from "@radix-ui/react-tooltip";
 import { Check, Play, Settings, X as Close, RotateCcw, Wand2 } from "lucide-react";
 import { z } from "zod";
+import {
+  DEFAULT_MODEL_VARIANT,
+  MODEL_VARIANT_LABELS,
+  MODEL_VARIANTS,
+  type ModelVariant,
+} from "@/lib/modelVariant";
 
 interface TileGenerateModalProps {
   open: boolean;
@@ -23,6 +29,7 @@ const GRID_SIZE = 3;
 export function TileGenerateModal({ open, onClose, x, y, z, onUpdate }: TileGenerateModalProps) {
   const [tiles, setTiles] = useState<string[][]>([]);
   const [prompt, setPrompt] = useState("");
+  const [modelVariant, setModelVariant] = useState<ModelVariant>(DEFAULT_MODEL_VARIANT);
   const [loading, setLoading] = useState(false);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [previewId, setPreviewId] = useState<string | null>(null);
@@ -254,7 +261,7 @@ export function TileGenerateModal({ open, onClose, x, y, z, onUpdate }: TileGene
       const response = await fetch(`/api/edit-tile/${z}/${x}/${y}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt }),
+        body: JSON.stringify({ prompt, modelVariant }),
       });
       if (!response.ok) {
         const data = await response.json();
@@ -307,7 +314,7 @@ export function TileGenerateModal({ open, onClose, x, y, z, onUpdate }: TileGene
       const response = await fetch(`/api/edit-tile/${z}/${x}/${y}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt }),
+        body: JSON.stringify({ prompt, modelVariant }),
       });
       if (!response.ok) {
         const data = await response.json();
@@ -326,6 +333,7 @@ export function TileGenerateModal({ open, onClose, x, y, z, onUpdate }: TileGene
 
   const handleReset = () => {
     setPrompt("");
+    setModelVariant(DEFAULT_MODEL_VARIANT);
     setPreviewUrl(null);
     setPreviewId(null);
     setPreviewTiles(null);
@@ -376,6 +384,29 @@ export function TileGenerateModal({ open, onClose, x, y, z, onUpdate }: TileGene
             <div className="px-4 pb-4 space-y-4 flex-1">
               {/* Prompt area with circular generate CTA */}
               <div className="space-y-2">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-gray-500">Model</span>
+                  <div className="inline-flex rounded-lg border bg-gray-50 p-0.5">
+                    {MODEL_VARIANTS.map((variant) => {
+                      const active = modelVariant === variant;
+                      return (
+                        <button
+                          key={variant}
+                          type="button"
+                          onClick={() => setModelVariant(variant)}
+                          disabled={loading}
+                          className={`px-2.5 py-1 text-xs rounded-md transition-colors ${
+                            active
+                              ? "bg-blue-600 text-white"
+                              : "text-gray-600 hover:bg-gray-100"
+                          } disabled:opacity-50`}
+                        >
+                          {MODEL_VARIANT_LABELS[variant]}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
                 <div className="relative">
                   <textarea
                     id="prompt"

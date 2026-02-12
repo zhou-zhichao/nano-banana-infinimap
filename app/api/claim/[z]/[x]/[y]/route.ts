@@ -3,8 +3,12 @@ import { ZMAX } from "@/lib/coords";
 import { z as zod } from "zod";
 import { db } from "@/lib/adapters/db.file";
 import { fileQueue } from "@/lib/adapters/queue.file";
+import { DEFAULT_MODEL_VARIANT, MODEL_VARIANTS } from "@/lib/modelVariant";
 
-const Body = zod.object({ prompt: zod.string().min(1, "Prompt is required").max(500) });
+const Body = zod.object({
+  prompt: zod.string().min(1, "Prompt is required").max(500),
+  modelVariant: zod.enum(MODEL_VARIANTS).optional(),
+});
 
 export async function POST(req: NextRequest, { params }:{params:Promise<{z:string,x:string,y:string}>}) {
   const { z: zStr, x: xStr, y: yStr } = await params;
@@ -20,8 +24,9 @@ export async function POST(req: NextRequest, { params }:{params:Promise<{z:strin
     console.log(`   ❌ Validation error: ${firstError?.message || 'Invalid input'}`);
     return NextResponse.json({ error: firstError?.message || 'Invalid input' }, { status: 400 });
   }
-  const { prompt } = parsed.data;
+  const { prompt, modelVariant = DEFAULT_MODEL_VARIANT } = parsed.data;
   console.log(`   Prompt: "${prompt}"`);
+  console.log(`   Model variant: "${modelVariant}"`);
 
   // Check if tile is already being processed
   const existing = await db.getTile(z, x, y);
@@ -34,7 +39,7 @@ export async function POST(req: NextRequest, { params }:{params:Promise<{z:strin
     await db.upsertTile({ z,x,y, status:"PENDING" });        // idempotent mark
     console.log(`   Tile marked as PENDING in database`);
     
-    await fileQueue.enqueue(`gen-${z}-${x}-${y}`, { z,x,y,prompt }); // in-process
+    await fileQueue.enqueue(`gen-${z}-${x}-${y}`, { z, x, y, prompt, modelVariant }); // in-process
     console.log(`   ✅ Tile generation job enqueued successfully`);
     
     return NextResponse.json({ ok:true, status:"ENQUEUED" });

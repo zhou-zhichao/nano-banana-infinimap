@@ -16,6 +16,7 @@ type GenerateGridImageInput = {
   styleName: string;
   gridPng: Buffer;
   negativePrompt?: string;
+  model?: string;
 };
 
 type GenerateGridImageOutput = {
@@ -115,6 +116,7 @@ export async function generateGridImage(input: GenerateGridImageInput): Promise<
           style_name: input.styleName,
           grid_png_base64: input.gridPng.toString("base64"),
           negative_prompt: input.negativePrompt ?? "",
+          ...(input.model ? { model: input.model } : {}),
         }),
         signal: controller.signal,
       });

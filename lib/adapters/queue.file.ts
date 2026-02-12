@@ -28,7 +28,9 @@ export const fileQueue: Queue = {
     RUNNING.add(key);
     try {
       await withFileLock(`job_${key.replace(/\//g, '_')}`, async () => {
-        const res = await generateTile(payload.z, payload.x, payload.y, payload.prompt);
+        const res = await generateTile(payload.z, payload.x, payload.y, payload.prompt, {
+          modelVariant: payload.modelVariant,
+        });
         await bubbleHashes(payload.z, payload.x, payload.y);
         return res;
       });

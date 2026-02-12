@@ -40,6 +40,7 @@ class GenerateGridRequest(BaseModel):
     style_name: str = Field(min_length=1, max_length=200, default="default-style")
     grid_png_base64: str = Field(min_length=1)
     negative_prompt: str = Field(default="", max_length=1000)
+    model: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class GenerateGridResponse(BaseModel):
@@ -229,10 +230,11 @@ def get_model_fallbacks() -> list[str]:
     return ordered
 
 
-def get_candidate_models() -> list[str]:
+def get_candidate_models(preferred_model: str | None = None) -> list[str]:
     configured = (get_vertex_model() or "").strip()
     ordered: list[str] = []
-    for model_name in [configured, *get_model_fallbacks()]:
+    preferred = (preferred_model or "").strip()
+    for model_name in [preferred, configured, *get_model_fallbacks()]:
         if model_name and model_name not in ordered:
             ordered.append(model_name)
     return ordered
@@ -419,7 +421,7 @@ def generate_grid(payload: GenerateGridRequest) -> GenerateGridResponse:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     grid_png = decode_base64_png(payload.grid_png_base64)
-    models = get_candidate_models()
+    models = get_candidate_models(payload.model)
     prompt_text = build_prompt(payload.prompt, payload.style_name, payload.negative_prompt)
     last_error: Exception | None = None
     saw_rate_limit = False
@@ -443,7 +445,7 @@ def generate_grid(payload: GenerateGridRequest) -> GenerateGridResponse:
             latency_ms = int((time.perf_counter() - start) * 1000)
             if model_name != models[0]:
                 logger.warning(
-                    "Configured model '%s' unavailable; used fallback model '%s'",
+                    "Primary model '%s' unavailable; used fallback model '%s'",
                     models[0],
                     model_name,
                 )

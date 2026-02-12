@@ -7,11 +7,13 @@ import { generateGridPreview } from "@/lib/generator";
 import { readTileFile } from "@/lib/storage";
 import { TILE } from "@/lib/coords";
 import { PythonImageServiceError } from "@/lib/pythonImageService";
+import { DEFAULT_MODEL_VARIANT, MODEL_VARIANTS } from "@/lib/modelVariant";
 
 const TILE_SIZE = TILE;
 
 const requestSchema = z.object({
   prompt: z.string().min(1),
+  modelVariant: z.enum(MODEL_VARIANTS).optional(),
   applyToAllNew: z.boolean().optional(),
   newTilePositions: z.array(z.object({
     x: z.number(),
@@ -131,10 +133,10 @@ export async function POST(
     const y = parseInt(params.y, 10);
     
     const body = await req.json();
-    const { prompt } = requestSchema.parse(body);
+    const { prompt, modelVariant = DEFAULT_MODEL_VARIANT } = requestSchema.parse(body);
     
     // Ask the generator for a full 3×3 composite (RAW model output)
-    const finalComposite = await generateGridPreview(z, x, y, prompt);
+    const finalComposite = await generateGridPreview(z, x, y, prompt, { modelVariant });
     
     // Save preview to temporary location
     const tempDir = path.join(process.cwd(), '.temp');

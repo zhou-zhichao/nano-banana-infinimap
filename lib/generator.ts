@@ -5,6 +5,8 @@ import { db } from "./adapters/db.file";
 import { blake2sHex, hashTilePayload } from "./hashing";
 import { loadStyleControl } from "./style";
 import { generateGridImage } from "./pythonImageService";
+import { DEFAULT_MODEL_VARIANT, ModelVariant } from "./modelVariant";
+import { resolveVertexModelForVariant } from "./serverModelResolver";
 
 type NeighborDir = "N" | "S" | "E" | "W" | "NE" | "NW" | "SE" | "SW";
 
@@ -42,6 +44,12 @@ type ModelInput = {
   styleName: string;
   neighbors: { dir: NeighborDir; buf: Buffer | null }[];
   seedHex: string;
+  modelVariant: ModelVariant;
+  requestedModel: string;
+};
+
+type GenerationOptions = {
+  modelVariant?: ModelVariant;
 };
 
 async function getNeighbors(z: number, x: number, y: number) {
@@ -90,6 +98,8 @@ async function runModel(input: ModelInput): Promise<Buffer> {
   console.log("  Prompt:", input.prompt);
   console.log("  Style:", input.styleName);
   console.log("  Seed:", input.seedHex);
+  console.log("  Model variant:", input.modelVariant);
+  console.log("  Requested model:", input.requestedModel);
 
   try {
     const gridImage = await buildGridContextImage(input.neighbors);
@@ -99,6 +109,7 @@ async function runModel(input: ModelInput): Promise<Buffer> {
       prompt: input.prompt,
       styleName: input.styleName,
       gridPng: gridImage,
+      model: input.requestedModel,
     });
     console.log(`  Python service model: ${generated.model}`);
     console.log(`  Python service latency: ${generated.latencyMs}ms`);
@@ -176,17 +187,25 @@ function edgeRect(dir: NeighborDir): string {
 }
 
 /** Generate a tile preview without saving to disk */
-export async function generateTilePreview(z: number, x: number, y: number, prompt: string): Promise<Buffer> {
+export async function generateTilePreview(
+  z: number,
+  x: number,
+  y: number,
+  prompt: string,
+  options?: GenerationOptions,
+): Promise<Buffer> {
   console.log(`\ngenerateTilePreview called for z:${z} x:${x} y:${y}`);
   console.log(`  User prompt: "${prompt}"`);
 
   if (z !== ZMAX) throw new Error("Generation only at max zoom");
 
   const { name: styleName } = await loadStyleControl();
-  const seedHex = blake2sHex(Buffer.from(`${z}:${x}:${y}:${styleName}:${prompt}`)).slice(0, 8);
+  const modelVariant = options?.modelVariant ?? DEFAULT_MODEL_VARIANT;
+  const requestedModel = resolveVertexModelForVariant(modelVariant);
+  const seedHex = blake2sHex(Buffer.from(`${z}:${x}:${y}:${styleName}:${prompt}:${modelVariant}`)).slice(0, 8);
 
   const neighbors = await getNeighbors(z, x, y);
-  const buf = await runModel({ prompt, styleName, neighbors, seedHex });
+  const buf = await runModel({ prompt, styleName, neighbors, seedHex, modelVariant, requestedModel });
 
   console.log(`  Tile preview generated for z:${z} x:${x} y:${y}\n`);
   return buf;
@@ -196,11 +215,19 @@ export async function generateTilePreview(z: number, x: number, y: number, promp
  * Generate a full 3x3 grid preview image (768x768 WebP) containing
  * the model's predicted content for the neighborhood.
  */
-export async function generateGridPreview(z: number, x: number, y: number, prompt: string): Promise<Buffer> {
+export async function generateGridPreview(
+  z: number,
+  x: number,
+  y: number,
+  prompt: string,
+  options?: GenerationOptions,
+): Promise<Buffer> {
   if (z !== ZMAX) throw new Error("Generation only at max zoom");
 
   const { name: styleName } = await loadStyleControl();
-  const seedHex = blake2sHex(Buffer.from(`${z}:${x}:${y}:${styleName}:${prompt}`)).slice(0, 8);
+  const modelVariant = options?.modelVariant ?? DEFAULT_MODEL_VARIANT;
+  const requestedModel = resolveVertexModelForVariant(modelVariant);
+  const seedHex = blake2sHex(Buffer.from(`${z}:${x}:${y}:${styleName}:${prompt}:${modelVariant}`)).slice(0, 8);
   const neighbors = await getNeighbors(z, x, y);
 
   try {
@@ -211,6 +238,7 @@ export async function generateGridPreview(z: number, x: number, y: number, promp
       prompt,
       styleName,
       gridPng: gridContext,
+      model: requestedModel,
     });
     let imageBuffer = generated.imageBuffer;
     const metadata = await sharp(imageBuffer).metadata();
@@ -224,7 +252,7 @@ export async function generateGridPreview(z: number, x: number, y: number, promp
       throw err;
     }
 
-    const center = await runModelStub({ prompt, styleName, neighbors, seedHex });
+    const center = await runModelStub({ prompt, styleName, neighbors, seedHex, modelVariant, requestedModel });
 
     const composites: sharp.OverlayOptions[] = [];
     const pos = [
@@ -265,7 +293,13 @@ export async function generateGridPreview(z: number, x: number, y: number, promp
   }
 }
 
-export async function generateTile(z: number, x: number, y: number, prompt: string) {
+export async function generateTile(
+  z: number,
+  x: number,
+  y: number,
+  prompt: string,
+  options?: GenerationOptions,
+) {
   console.log(`\ngenerateTile called for z:${z} x:${x} y:${y}`);
   console.log(`  User prompt: "${prompt}"`);
 
@@ -275,10 +309,12 @@ export async function generateTile(z: number, x: number, y: number, prompt: stri
   console.log("  Tile marked as PENDING");
 
   const { name: styleName } = await loadStyleControl();
-  const seedHex = blake2sHex(Buffer.from(`${z}:${x}:${y}:${styleName}:${prompt}`)).slice(0, 8);
+  const modelVariant = options?.modelVariant ?? DEFAULT_MODEL_VARIANT;
+  const requestedModel = resolveVertexModelForVariant(modelVariant);
+  const seedHex = blake2sHex(Buffer.from(`${z}:${x}:${y}:${styleName}:${prompt}:${modelVariant}`)).slice(0, 8);
 
   const neighbors = await getNeighbors(z, x, y);
-  const buf = await runModel({ prompt, styleName, neighbors, seedHex });
+  const buf = await runModel({ prompt, styleName, neighbors, seedHex, modelVariant, requestedModel });
 
   const bytesHash = blake2sHex(buf).slice(0, 16);
   const contentVer = (rec.contentVer ?? 0) + 1;

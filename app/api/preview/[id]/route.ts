@@ -4,11 +4,12 @@ import { NextRequest, NextResponse } from "next/server";
 import sharp from "sharp";
 import { TILE } from "@/lib/coords";
 import { alignCompositeOverBase, translateImage } from "@/lib/drift";
-import { readTileFile } from "@/lib/storage";
 import { isTileInBounds } from "@/lib/tilemaps/bounds";
 import { ensureTilemapsBootstrap } from "@/lib/tilemaps/bootstrap";
 import { DEFAULT_MAP_ID } from "@/lib/tilemaps/constants";
 import { getTilemapManifest } from "@/lib/tilemaps/service";
+import { resolveTimelineContextByNodeId } from "@/lib/timeline/context";
+import { resolveEffectiveTileBuffer } from "@/lib/timeline/storage";
 
 const TILE_SIZE = TILE;
 
@@ -17,6 +18,8 @@ type PreviewMeta = {
   z: number;
   x: number;
   y: number;
+  timelineNodeId: string;
+  timelineIndex: number;
   createdAt: string;
 };
 
@@ -99,6 +102,11 @@ export async function GET(req: NextRequest, context: { params: Promise<{ id: str
       return NextResponse.json({ error: "Tilemap not found" }, { status: 404 });
     }
 
+    const previewTimeline = await resolveTimelineContextByNodeId(previewMeta.mapId, previewMeta.timelineNodeId);
+    if (!previewTimeline) {
+      return NextResponse.json({ error: "Preview timeline node not found" }, { status: 404 });
+    }
+
     const previewPath = path.join(process.cwd(), ".temp", `${previewId}.webp`);
     const raw = await fs.readFile(previewPath);
     if (mode !== "blended") {
@@ -129,7 +137,7 @@ export async function GET(req: NextRequest, context: { params: Promise<{ id: str
           );
           continue;
         }
-        const existing = await readTileFile(previewMeta.mapId, z, tileX, tileY);
+        const existing = await resolveEffectiveTileBuffer(previewTimeline, z, tileX, tileY);
         if (existing) {
           row.push(await sharp(existing).resize(TILE_SIZE, TILE_SIZE, { fit: "fill" }).png().toBuffer());
         } else {
@@ -175,7 +183,7 @@ export async function GET(req: NextRequest, context: { params: Promise<{ id: str
           continue;
         }
 
-        const existing = await readTileFile(previewMeta.mapId, z, tileX, tileY);
+        const existing = await resolveEffectiveTileBuffer(previewTimeline, z, tileX, tileY);
         const rawTile = await sharp(effectiveRaw)
           .extract({ left: dx * TILE_SIZE, top: dy * TILE_SIZE, width: TILE_SIZE, height: TILE_SIZE })
           .webp()

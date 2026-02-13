@@ -117,6 +117,8 @@ This project now binds Next.js to `0.0.0.0` by default for `dev` and `start` (ov
   - `blank` (custom size `1..256` x `1..256`)
   - `moon` (fixed index range `0..60 x 0..40`, actual `61x41` tiles)
 - Map selection is stored in URL via `?mapId=...`.
+- Timeline selection is stored in URL via `?t=...` (1-based, default `t=1`).
+- Map switch in the workspace keeps `mapId` and resets timeline to `t=1`.
 
 Data layout:
 
@@ -124,10 +126,16 @@ Data layout:
 - `.tilemaps/maps/<mapId>/map.json` -> tilemap manifest
 - `.tilemaps/maps/<mapId>/tiles/` -> tile images
 - `.tilemaps/maps/<mapId>/meta/` -> tile metadata JSON
+- `.tilemaps/maps/<mapId>/timeline/manifest.json` -> timeline manifest for this map
+- `.tilemaps/maps/<mapId>/timeline/nodes/<nodeId>/tiles/` -> timeline overlay tile files
+- `.tilemaps/maps/<mapId>/timeline/nodes/<nodeId>/meta/` -> timeline overlay metadata
 - `.tilemaps/maps/<mapId>/locks/` -> lock files
 - `.tilemaps/maps/<mapId>/queue/` -> queue files
 
 On first bootstrap, legacy `.tiles` is migrated into moon preset tiles using `z_y_x -> z_x_y` conversion, then `default` is created from that preset.
+If legacy `.timeline/` exists, it is migrated to `default` map timeline storage.
+
+All timeline-aware APIs (`/api/timeline`, `/api/meta/:z/:x/:y`, `/api/tiles/:z/:x/:y`, `/api/claim`, `/api/invalidate`, `/api/edit-tile`, `/api/confirm-edit`) resolve state using both `mapId` and `t`.
 
 ## Precompute Parent Tiles (Manual)
 

@@ -7,6 +7,14 @@ import { loadStyleControl } from "./style";
 import { generateGridImage } from "./pythonImageService";
 import { DEFAULT_MODEL_VARIANT, ModelVariant } from "./modelVariant";
 import { resolveVertexModelForVariant } from "./serverModelResolver";
+import { resolveTimelineContextByNodeId } from "./timeline/context";
+import {
+  markTimelineTilePending,
+  readTimelineNodeMeta,
+  resolveEffectiveTileBuffer,
+  writeTimelineTileReady,
+} from "./timeline/storage";
+import { TimelineContext } from "./timeline/types";
 
 type NeighborDir = "N" | "S" | "E" | "W" | "NE" | "NW" | "SE" | "SW";
 
@@ -48,14 +56,33 @@ type ModelInput = {
   requestedModel: string;
 };
 
-type GenerationOptions = {
+export type GenerationOptions = {
   modelVariant?: ModelVariant;
+  timelineNodeId?: string;
 };
 
-async function getNeighbors(mapId: string, z: number, x: number, y: number) {
+async function resolveGenerationTimelineContext(
+  mapId: string,
+  timelineNodeId?: string,
+): Promise<TimelineContext | null> {
+  if (!timelineNodeId) return null;
+  return resolveTimelineContextByNodeId(mapId, timelineNodeId);
+}
+
+async function getNeighbors(
+  mapId: string,
+  z: number,
+  x: number,
+  y: number,
+  timelineContext: TimelineContext | null,
+) {
   const out: { dir: NeighborDir; buf: Buffer | null }[] = [];
   for (const [dir, dx, dy] of dirs) {
-    out.push({ dir, buf: await readTileFile(mapId, z, x + dx, y + dy) });
+    if (timelineContext) {
+      out.push({ dir, buf: await resolveEffectiveTileBuffer(timelineContext, z, x + dx, y + dy) });
+    } else {
+      out.push({ dir, buf: await readTileFile(mapId, z, x + dx, y + dy) });
+    }
   }
   return out;
 }
@@ -86,10 +113,10 @@ async function buildGridContextImage(neighbors: { dir: NeighborDir; buf: Buffer 
   return sharp(Buffer.from(checkerboardSvg)).composite(overlays).png().toBuffer();
 }
 
-async function writeDebugImage(path: string, image: Buffer) {
+async function writeDebugImage(outputPath: string, image: Buffer) {
   if (!DEBUG_MODE) return;
-  await sharp(image).toFile(path);
-  console.log(`  Saved debug image: ${path}`);
+  await sharp(image).toFile(outputPath);
+  console.log(`  Saved debug image: ${outputPath}`);
 }
 
 /** Generate tile using Python FastAPI + Vertex model */
@@ -161,16 +188,16 @@ async function runModelStub(input: ModelInput): Promise<Buffer> {
   let img = await base.toBuffer();
 
   const overlays: Buffer[] = [];
-  for (const n of input.neighbors) {
-    if (!n.buf) continue;
+  for (const neighbor of input.neighbors) {
+    if (!neighbor.buf) continue;
     const line = Buffer.from(
-      `<svg width="${TILE}" height="${TILE}"><rect ${edgeRect(n.dir)} fill="#ffffff" fill-opacity="0.15"/></svg>`,
+      `<svg width="${TILE}" height="${TILE}"><rect ${edgeRect(neighbor.dir)} fill="#ffffff" fill-opacity="0.15"/></svg>`,
     );
     overlays.push(await sharp(line).png().toBuffer());
   }
 
   if (overlays.length) {
-    img = await sharp(img).composite(overlays.map((o) => ({ input: o }))).toBuffer();
+    img = await sharp(img).composite(overlays.map((overlay) => ({ input: overlay }))).toBuffer();
   }
   return sharp(img).webp({ quality: 90 }).toBuffer();
 }
@@ -200,12 +227,17 @@ export async function generateTilePreview(
 
   if (z !== ZMAX) throw new Error("Generation only at max zoom");
 
+  const timelineContext = await resolveGenerationTimelineContext(mapId, options?.timelineNodeId);
+  if (options?.timelineNodeId && !timelineContext) {
+    throw new Error(`Timeline node not found: ${options.timelineNodeId}`);
+  }
+
   const { name: styleName } = await loadStyleControl();
   const modelVariant = options?.modelVariant ?? DEFAULT_MODEL_VARIANT;
   const requestedModel = resolveVertexModelForVariant(modelVariant);
   const seedHex = blake2sHex(Buffer.from(`${z}:${x}:${y}:${styleName}:${prompt}:${modelVariant}`)).slice(0, 8);
 
-  const neighbors = await getNeighbors(mapId, z, x, y);
+  const neighbors = await getNeighbors(mapId, z, x, y, timelineContext);
   const buf = await runModel({ prompt, styleName, neighbors, seedHex, modelVariant, requestedModel });
 
   console.log(`  Tile preview generated for z:${z} x:${x} y:${y}\n`);
@@ -226,11 +258,16 @@ export async function generateGridPreview(
 ): Promise<Buffer> {
   if (z !== ZMAX) throw new Error("Generation only at max zoom");
 
+  const timelineContext = await resolveGenerationTimelineContext(mapId, options?.timelineNodeId);
+  if (options?.timelineNodeId && !timelineContext) {
+    throw new Error(`Timeline node not found: ${options.timelineNodeId}`);
+  }
+
   const { name: styleName } = await loadStyleControl();
   const modelVariant = options?.modelVariant ?? DEFAULT_MODEL_VARIANT;
   const requestedModel = resolveVertexModelForVariant(modelVariant);
   const seedHex = blake2sHex(Buffer.from(`${z}:${x}:${y}:${styleName}:${prompt}:${modelVariant}`)).slice(0, 8);
-  const neighbors = await getNeighbors(mapId, z, x, y);
+  const neighbors = await getNeighbors(mapId, z, x, y, timelineContext);
 
   try {
     const gridContext = await buildGridContextImage(neighbors);
@@ -249,9 +286,9 @@ export async function generateGridPreview(
     }
     await writeDebugImage(`.debug/debug-grid-preview-response-${seedHex}.png`, imageBuffer);
     return sharp(imageBuffer).webp({ quality: 90 }).toBuffer();
-  } catch (err) {
+  } catch (error) {
     if (!ALLOW_STUB_FALLBACK) {
-      throw err;
+      throw error;
     }
 
     const center = await runModelStub({ prompt, styleName, neighbors, seedHex, modelVariant, requestedModel });
@@ -274,9 +311,9 @@ export async function generateGridPreview(
         composites.push({ input: center, left: cx * TILE, top: cy * TILE });
         continue;
       }
-      const n = neighbors.find((nn) => nn.dir === key);
-      if (n?.buf) {
-        const resized = await sharp(n.buf).resize(TILE, TILE).toBuffer();
+      const neighbor = neighbors.find((item) => item.dir === key);
+      if (neighbor?.buf) {
+        const resized = await sharp(neighbor.buf).resize(TILE, TILE).toBuffer();
         composites.push({ input: resized, left: cx * TILE, top: cy * TILE });
       }
     }
@@ -308,7 +345,15 @@ export async function generateTile(
 
   if (z !== ZMAX) throw new Error("Generation only at max zoom");
 
-  const rec = await db.upsertTile(mapId, { z, x, y, status: "PENDING" });
+  const timelineContext = await resolveGenerationTimelineContext(mapId, options?.timelineNodeId);
+  if (options?.timelineNodeId && !timelineContext) {
+    throw new Error(`Timeline node not found: ${options.timelineNodeId}`);
+  }
+
+  const baselineRecord = timelineContext ? null : await db.upsertTile(mapId, { z, x, y, status: "PENDING" });
+  if (timelineContext) {
+    await markTimelineTilePending(mapId, timelineContext.node.id, z, x, y);
+  }
   console.log("  Tile marked as PENDING");
 
   const { name: styleName } = await loadStyleControl();
@@ -316,11 +361,31 @@ export async function generateTile(
   const requestedModel = resolveVertexModelForVariant(modelVariant);
   const seedHex = blake2sHex(Buffer.from(`${z}:${x}:${y}:${styleName}:${prompt}:${modelVariant}`)).slice(0, 8);
 
-  const neighbors = await getNeighbors(mapId, z, x, y);
+  const neighbors = await getNeighbors(mapId, z, x, y, timelineContext);
   const buf = await runModel({ prompt, styleName, neighbors, seedHex, modelVariant, requestedModel });
-
   const bytesHash = blake2sHex(buf).slice(0, 16);
-  const contentVer = (rec.contentVer ?? 0) + 1;
+
+  if (timelineContext) {
+    const current = await readTimelineNodeMeta(mapId, timelineContext.node.id, z, x, y);
+    const contentVer = (current?.contentVer ?? 0) + 1;
+    const hash = hashTilePayload({
+      algorithmVersion: 1,
+      contentVer,
+      bytesHash,
+      seed: seedHex,
+    });
+
+    await writeTimelineTileReady(mapId, timelineContext.node.id, z, x, y, buf, { hash, seed: seedHex });
+    console.log(`  Timeline tile marked as READY with hash: ${hash}`);
+
+    generateParentTilesForChild(mapId, z, x, y, timelineContext).catch((error) => {
+      console.error(`Failed to generate timeline parent tiles: ${error}`);
+    });
+    console.log(`  Tile generation complete for z:${z} x:${x} y:${y}\n`);
+    return { hash, contentVer };
+  }
+
+  const contentVer = (baselineRecord?.contentVer ?? 0) + 1;
   const hash = hashTilePayload({
     algorithmVersion: 1,
     contentVer,
@@ -338,15 +403,23 @@ export async function generateTile(
     seed: seedHex,
   });
   console.log(`  Tile marked as READY with hash: ${updated.hash}`);
-  console.log(`  Tile generation complete for z:${z} x:${x} y:${y}\n`);
 
-  generateParentTilesForChild(mapId, z, x, y).catch((err) => console.error(`Failed to generate parent tiles: ${err}`));
+  generateParentTilesForChild(mapId, z, x, y, null).catch((error) => {
+    console.error(`Failed to generate parent tiles: ${error}`);
+  });
+  console.log(`  Tile generation complete for z:${z} x:${x} y:${y}\n`);
 
   return { hash: updated.hash!, contentVer: updated.contentVer! };
 }
 
-async function generateParentTilesForChild(mapId: string, z: number, x: number, y: number) {
-  const { generateParentTile } = await import("./parentTiles");
+async function generateParentTilesForChild(
+  mapId: string,
+  z: number,
+  x: number,
+  y: number,
+  timelineContext: TimelineContext | null,
+) {
+  const { generateParentTile, generateParentTileAtNode } = await import("./parentTiles");
   const { parentOf } = await import("./coords");
 
   console.log(`  Generating parent tiles for z:${z} x:${x} y:${y}`);
@@ -357,7 +430,11 @@ async function generateParentTilesForChild(mapId: string, z: number, x: number, 
 
   while (currentZ > 0) {
     const parent = parentOf(currentZ, currentX, currentY);
-    await generateParentTile(mapId, parent.z, parent.x, parent.y);
+    if (timelineContext) {
+      await generateParentTileAtNode(timelineContext, parent.z, parent.x, parent.y);
+    } else {
+      await generateParentTile(mapId, parent.z, parent.x, parent.y);
+    }
 
     currentZ = parent.z;
     currentX = parent.x;

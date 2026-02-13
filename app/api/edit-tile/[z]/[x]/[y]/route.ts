@@ -6,6 +6,7 @@ import { generateGridPreview } from "@/lib/generator";
 import { DEFAULT_MODEL_VARIANT, MODEL_VARIANTS } from "@/lib/modelVariant";
 import { isTileInBounds } from "@/lib/tilemaps/bounds";
 import { MapContextError, resolveMapContext } from "@/lib/tilemaps/context";
+import { parseTimelineIndexFromRequest, resolveTimelineContext } from "@/lib/timeline/context";
 import { PythonImageServiceError } from "@/lib/pythonImageService";
 
 const requestSchema = z.object({
@@ -19,10 +20,13 @@ export async function POST(
 ) {
   let mapId = "default";
   let map: any = null;
+  let timelineIndex = 1;
+
   try {
     const resolved = await resolveMapContext(req);
     mapId = resolved.mapId;
     map = resolved.map;
+    timelineIndex = parseTimelineIndexFromRequest(req);
   } catch (error) {
     if (error instanceof MapContextError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
@@ -42,7 +46,11 @@ export async function POST(
 
     const body = await req.json();
     const { prompt, modelVariant = DEFAULT_MODEL_VARIANT } = requestSchema.parse(body);
-    const finalComposite = await generateGridPreview(mapId, zLevel, x, y, prompt, { modelVariant });
+    const timeline = await resolveTimelineContext(mapId, timelineIndex);
+    const finalComposite = await generateGridPreview(mapId, zLevel, x, y, prompt, {
+      modelVariant,
+      timelineNodeId: timeline.node.id,
+    });
 
     const tempDir = path.join(process.cwd(), ".temp");
     await fs.mkdir(tempDir, { recursive: true });
@@ -60,6 +68,8 @@ export async function POST(
           z: zLevel,
           x,
           y,
+          timelineNodeId: timeline.node.id,
+          timelineIndex: timeline.index,
           createdAt: new Date().toISOString(),
         },
         null,
@@ -67,7 +77,11 @@ export async function POST(
       ),
     );
 
-    return NextResponse.json({ previewUrl: `/api/preview/${previewId}?mapId=${encodeURIComponent(mapId)}`, previewId });
+    return NextResponse.json({
+      previewUrl: `/api/preview/${previewId}?mapId=${encodeURIComponent(mapId)}&t=${timeline.index}`,
+      previewId,
+      timelineIndex: timeline.index,
+    });
   } catch (error) {
     let status = 500;
     const headers: Record<string, string> = {};

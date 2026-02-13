@@ -1,19 +1,21 @@
-import fs from "node:fs/promises";
 import { NextRequest, NextResponse } from "next/server";
-import { childrenOf, parentOf, ZMAX } from "@/lib/coords";
-import { db } from "@/lib/adapters/db.file";
-import { generateParentTile } from "@/lib/parentTiles";
-import { tilePath } from "@/lib/storage";
+import { ZMAX, parentOf } from "@/lib/coords";
+import { generateParentTileAtNode } from "@/lib/parentTiles";
 import { isTileInBounds } from "@/lib/tilemaps/bounds";
 import { MapContextError, resolveMapContext } from "@/lib/tilemaps/context";
+import { parseTimelineIndexFromRequest, resolveTimelineContext } from "@/lib/timeline/context";
+import { markTimelineTileTombstone } from "@/lib/timeline/storage";
 
 export async function DELETE(req: NextRequest, { params }: { params: Promise<{ z: string; x: string; y: string }> }) {
   let mapId = "default";
   let map: any = null;
+  let timelineIndex = 1;
+
   try {
     const resolved = await resolveMapContext(req);
     mapId = resolved.mapId;
     map = resolved.map;
+    timelineIndex = parseTimelineIndexFromRequest(req);
   } catch (error) {
     if (error instanceof MapContextError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
@@ -34,34 +36,21 @@ export async function DELETE(req: NextRequest, { params }: { params: Promise<{ z
   }
 
   try {
-    const targetPath = tilePath(mapId, z, x, y);
-    await fs.unlink(targetPath).catch(() => {});
-    await db.updateTile(mapId, z, x, y, { status: "EMPTY", hash: undefined, contentVer: 0 });
+    const timeline = await resolveTimelineContext(mapId, timelineIndex);
+    await markTimelineTileTombstone(mapId, timeline.node.id, z, x, y);
 
-    (async () => {
-      let cz = z;
-      let cx = x;
-      let cy = y;
-      while (cz > 0) {
-        const p = parentOf(cz, cx, cy);
-        const kids = childrenOf(p.z, p.x, p.y);
-        const buffers = await Promise.all(
-          kids.map((child) => fs.readFile(tilePath(mapId, child.z, child.x, child.y)).catch(() => null)),
-        );
-        const hasAnyChild = buffers.some((buf) => buf !== null);
-        if (hasAnyChild) {
-          await generateParentTile(mapId, p.z, p.x, p.y);
-        } else {
-          await fs.unlink(tilePath(mapId, p.z, p.x, p.y)).catch(() => {});
-          await db.updateTile(mapId, p.z, p.x, p.y, { status: "EMPTY", hash: undefined, contentVer: 0 });
-        }
-        cz = p.z;
-        cx = p.x;
-        cy = p.y;
-      }
-    })().catch((err) => console.error(`Error regenerating parents after delete ${z}/${x}/${y}:`, err));
+    let cz = z;
+    let cx = x;
+    let cy = y;
+    while (cz > 0) {
+      const parent = parentOf(cz, cx, cy);
+      await generateParentTileAtNode(timeline, parent.z, parent.x, parent.y);
+      cz = parent.z;
+      cx = parent.x;
+      cy = parent.y;
+    }
 
-    return NextResponse.json({ ok: true, message: "Tile deleted" });
+    return NextResponse.json({ ok: true, message: "Tile deleted", timelineIndex: timeline.index });
   } catch (error) {
     return NextResponse.json(
       { error: "Failed to delete tile", details: error instanceof Error ? error.message : "Unknown error" },

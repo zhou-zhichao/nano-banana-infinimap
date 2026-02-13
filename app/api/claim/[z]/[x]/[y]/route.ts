@@ -1,11 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z as zod } from "zod";
-import { db } from "@/lib/adapters/db.file";
 import { fileQueue } from "@/lib/adapters/queue.file";
 import { ZMAX } from "@/lib/coords";
 import { DEFAULT_MODEL_VARIANT, MODEL_VARIANTS } from "@/lib/modelVariant";
 import { isTileInBounds } from "@/lib/tilemaps/bounds";
 import { MapContextError, resolveMapContext } from "@/lib/tilemaps/context";
+import { parseTimelineIndexFromRequest, resolveTimelineContext } from "@/lib/timeline/context";
+import { markTimelineTilePending, resolveEffectiveTileMeta } from "@/lib/timeline/storage";
 
 const Body = zod.object({
   prompt: zod.string().min(1, "Prompt is required").max(500),
@@ -15,10 +16,13 @@ const Body = zod.object({
 export async function POST(req: NextRequest, { params }: { params: Promise<{ z: string; x: string; y: string }> }) {
   let mapId = "default";
   let map: any = null;
+  let timelineIndex = 1;
+
   try {
     const resolved = await resolveMapContext(req);
     mapId = resolved.mapId;
     map = resolved.map;
+    timelineIndex = parseTimelineIndexFromRequest(req);
   } catch (error) {
     if (error instanceof MapContextError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
@@ -38,19 +42,32 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ z: 
   if (!parsed.success) {
     return NextResponse.json({ error: parsed.error.issues[0]?.message || "Invalid input" }, { status: 400 });
   }
-
   const { prompt, modelVariant = DEFAULT_MODEL_VARIANT } = parsed.data;
-  const existing = await db.getTile(mapId, z, x, y);
-  if (existing?.status === "PENDING") {
-    return NextResponse.json({ ok: true, status: "ALREADY_PENDING", message: "Tile generation already in progress" });
-  }
 
   try {
-    await db.upsertTile(mapId, { z, x, y, status: "PENDING" });
-    await fileQueue.enqueue(`gen-${z}-${x}-${y}`, { mapId, z, x, y, prompt, modelVariant });
-    return NextResponse.json({ ok: true, status: "ENQUEUED" });
+    const timeline = await resolveTimelineContext(mapId, timelineIndex);
+    const existing = await resolveEffectiveTileMeta(timeline, z, x, y);
+    if (existing.status === "PENDING") {
+      return NextResponse.json({
+        ok: true,
+        status: "ALREADY_PENDING",
+        message: "Tile generation already in progress",
+        timelineIndex: timeline.index,
+      });
+    }
+
+    await markTimelineTilePending(mapId, timeline.node.id, z, x, y);
+    await fileQueue.enqueue(`gen-${timeline.node.id}-${z}-${x}-${y}`, {
+      mapId,
+      z,
+      x,
+      y,
+      prompt,
+      modelVariant,
+      timelineNodeId: timeline.node.id,
+    });
+    return NextResponse.json({ ok: true, status: "ENQUEUED", timelineIndex: timeline.index });
   } catch (error) {
-    await db.updateTile(mapId, z, x, y, { status: "EMPTY" });
     return NextResponse.json(
       { error: "Failed to start generation", details: error instanceof Error ? error.message : "Unknown error" },
       { status: 500 },

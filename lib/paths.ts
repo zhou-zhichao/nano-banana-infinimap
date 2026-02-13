@@ -9,3 +9,4 @@ export const LEGACY_TILE_DIR = path.join(ROOT, ".tiles");
 export const LEGACY_META_DIR = path.join(ROOT, ".meta");
 export const LEGACY_LOCK_DIR = path.join(ROOT, ".locks");
 export const LEGACY_QUEUE_DIR = path.join(ROOT, ".queue");
+export const LEGACY_TIMELINE_DIR = path.join(ROOT, ".timeline");

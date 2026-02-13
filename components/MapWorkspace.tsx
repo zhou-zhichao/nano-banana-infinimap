@@ -46,10 +46,11 @@ export default function MapWorkspace() {
     if (loading || tilemaps.length === 0) return;
     if (tilemaps.some((item) => item.id === activeMapId)) return;
     const fallback = tilemaps[0];
-    const params = new URLSearchParams();
+    const params = new URLSearchParams(searchParams.toString());
     params.set("mapId", fallback.id);
+    params.set("t", "1");
     router.replace(`${pathname}?${params.toString()}`);
-  }, [activeMapId, loading, pathname, router, tilemaps]);
+  }, [activeMapId, loading, pathname, router, searchParams, tilemaps]);
 
   const activeMap = useMemo(
     () => tilemaps.find((item) => item.id === activeMapId) || tilemaps[0] || null,
@@ -58,11 +59,12 @@ export default function MapWorkspace() {
 
   const selectMap = useCallback(
     (mapId: string) => {
-      const params = new URLSearchParams();
+      const params = new URLSearchParams(searchParams.toString());
       params.set("mapId", mapId);
+      params.set("t", "1");
       router.push(`${pathname}?${params.toString()}`);
     },
-    [pathname, router],
+    [pathname, router, searchParams],
   );
 
   const handleCreated = useCallback(

@@ -3,14 +3,14 @@ import path from "node:path";
 import { NextRequest, NextResponse } from "next/server";
 import sharp from "sharp";
 import { z } from "zod";
-import { db } from "@/lib/adapters/db.file";
 import { parentOf, TILE } from "@/lib/coords";
 import { estimateGridDriftFromExistingTiles, translateImage } from "@/lib/drift";
 import { blake2sHex } from "@/lib/hashing";
-import { generateParentTile } from "@/lib/parentTiles";
-import { readTileFile, writeTileFile } from "@/lib/storage";
+import { generateParentTileAtNode } from "@/lib/parentTiles";
 import { isTileInBounds } from "@/lib/tilemaps/bounds";
 import { MapContextError, resolveMapContext } from "@/lib/tilemaps/context";
+import { parseTimelineIndexFromRequest, resolveTimelineContext } from "@/lib/timeline/context";
+import { resolveEffectiveTileBuffer, writeTimelineTileReady } from "@/lib/timeline/storage";
 
 const requestSchema = z.object({
   previewUrl: z.string(),
@@ -26,6 +26,8 @@ type PreviewMeta = {
   z: number;
   x: number;
   y: number;
+  timelineNodeId: string;
+  timelineIndex: number;
   createdAt: string;
 };
 
@@ -86,10 +88,13 @@ export async function POST(
 ) {
   let mapId = "default";
   let map: any = null;
+  let timelineIndex = 1;
+
   try {
     const resolved = await resolveMapContext(req);
     mapId = resolved.mapId;
     map = resolved.map;
+    timelineIndex = parseTimelineIndexFromRequest(req);
   } catch (error) {
     if (error instanceof MapContextError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
@@ -106,6 +111,7 @@ export async function POST(
       return NextResponse.json({ error: "Tile is outside map bounds" }, { status: 400 });
     }
 
+    const timeline = await resolveTimelineContext(mapId, timelineIndex);
     const body = await req.json();
     const { previewUrl, applyToAllNew, newTilePositions, selectedPositions, offsetX, offsetY } = requestSchema.parse(body);
     const selectedSet =
@@ -126,6 +132,9 @@ export async function POST(
     }
     if (previewMeta.z !== z || previewMeta.x !== centerX || previewMeta.y !== centerY) {
       return NextResponse.json({ error: "Preview coordinate mismatch" }, { status: 400 });
+    }
+    if (previewMeta.timelineNodeId !== timeline.node.id) {
+      return NextResponse.json({ error: "Preview timeline mismatch" }, { status: 400 });
     }
 
     let compositeBuffer: Buffer;
@@ -171,8 +180,8 @@ export async function POST(
           if (!isTileInBounds(map, z, tileX, tileY)) continue;
           const key = `${tileX},${tileY}`;
           if (selectedSet && !selectedSet.has(key)) continue;
-          const existsBuf = await readTileFile(mapId, z, tileX, tileY);
-          if (existsBuf) {
+          const existing = await resolveEffectiveTileBuffer(timeline, z, tileX, tileY);
+          if (existing) {
             hasSelectedExisting = true;
             break outer;
           }
@@ -182,13 +191,13 @@ export async function POST(
       if (hasSelectedExisting) {
         try {
           const estimated = await estimateGridDriftFromExistingTiles({
-            mapId,
             rawComposite: compositeBuffer,
             z,
             centerX,
             centerY,
             selectedSet,
             tileSize: TILE,
+            readTile: (tileZ, tileX, tileY) => resolveEffectiveTileBuffer(timeline, tileZ, tileX, tileY),
           });
 
           driftCorrection = {
@@ -218,7 +227,7 @@ export async function POST(
         if (!isTileInBounds(map, z, tileX, tileY)) continue;
 
         const key = `${tileX},${tileY}`;
-        const existingBuffer = await readTileFile(mapId, z, tileX, tileY);
+        const existingBuffer = await resolveEffectiveTileBuffer(timeline, z, tileX, tileY);
         const exists = Boolean(existingBuffer);
 
         if (selectedSet && !selectedSet.has(key)) continue;
@@ -245,9 +254,8 @@ export async function POST(
             .toBuffer();
         }
 
-        await writeTileFile(mapId, z, tileX, tileY, finalTile);
         const hash = blake2sHex(finalTile);
-        await db.upsertTile(mapId, { z, x: tileX, y: tileY, status: "READY", hash });
+        await writeTimelineTileReady(mapId, timeline.node.id, z, tileX, tileY, finalTile, { hash });
         updatedPositions.push({ x: tileX, y: tileY });
       }
     }
@@ -264,7 +272,7 @@ export async function POST(
       }
 
       for (const parent of parents.values()) {
-        await generateParentTile(mapId, levelZ - 1, parent.x, parent.y);
+        await generateParentTileAtNode(timeline, levelZ - 1, parent.x, parent.y);
       }
 
       currentLevel = new Set(Array.from(parents.keys()));
@@ -278,6 +286,7 @@ export async function POST(
       success: true,
       message: "Tiles updated successfully",
       driftCorrection,
+      timelineIndex: timeline.index,
     });
   } catch (error) {
     return NextResponse.json(

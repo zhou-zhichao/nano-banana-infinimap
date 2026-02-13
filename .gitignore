@@ -49,10 +49,12 @@ next-env.d.ts
 # tilemaps v1 data layout
 /.tilemaps/maps/**
 !/.tilemaps/maps/
+/.tilemaps/**/timeline/
 /.tilemaps/**/locks/
 /.tilemaps/**/queue/
 /.tilemaps/presets/moon/orphans/
 /.tilemaps/.bootstrap-v1.json
+/.timeline/
 
 # debug images
 /.debug/

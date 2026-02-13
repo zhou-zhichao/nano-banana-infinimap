@@ -15,7 +15,7 @@ export type EstimatedGridDrift = {
 };
 
 export type EstimateGridDriftParams = {
-  mapId: string;
+  mapId?: string;
   rawComposite: Buffer;
   z: number;
   centerX: number;
@@ -25,6 +25,7 @@ export type EstimateGridDriftParams = {
   maxShiftPx?: number;
   minPeakSingle?: number;
   minPeakMulti?: number;
+  readTile?: (z: number, x: number, y: number) => Promise<Buffer | null>;
 };
 
 const DEFAULT_MAX_SHIFT_PX = 64;
@@ -225,6 +226,12 @@ export async function estimateGridDriftFromExistingTiles(
     maxShiftPx = DEFAULT_MAX_SHIFT_PX,
     minPeakSingle = DEFAULT_MIN_PEAK_SINGLE,
     minPeakMulti = DEFAULT_MIN_PEAK_MULTI,
+    readTile = (tileZ, tileX, tileY) => {
+      if (!mapId) {
+        throw new Error("estimateGridDriftFromExistingTiles requires mapId or readTile callback");
+      }
+      return readTileFile(mapId, tileZ, tileX, tileY);
+    },
   } = params;
 
   const candidates: { tx: number; ty: number; peakValue: number }[] = [];
@@ -236,7 +243,7 @@ export async function estimateGridDriftFromExistingTiles(
       const key = `${tileX},${tileY}`;
       if (selectedSet && !selectedSet.has(key)) continue;
 
-      const existingTile = await readTileFile(mapId, z, tileX, tileY);
+      const existingTile = await readTile(z, tileX, tileY);
       if (!existingTile) continue;
 
       const rawTile = await sharp(rawComposite)

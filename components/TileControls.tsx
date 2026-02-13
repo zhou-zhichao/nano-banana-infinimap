@@ -6,6 +6,7 @@ import { TileGenerateModal } from "./TileGenerateModal";
 
 interface TileControlsProps {
   mapId: string;
+  timelineIndex: number;
   x: number;
   y: number;
   z: number;
@@ -16,7 +17,18 @@ interface TileControlsProps {
   onRefreshTiles?: () => void;
 }
 
-export default function TileControls({ mapId, x, y, z, exists, onGenerate, onRegenerate, onDelete, onRefreshTiles }: TileControlsProps) {
+export default function TileControls({
+  mapId,
+  timelineIndex,
+  x,
+  y,
+  z,
+  exists,
+  onGenerate,
+  onRegenerate,
+  onDelete,
+  onRefreshTiles,
+}: TileControlsProps) {
   const [generateModalOpen, setGenerateModalOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -132,6 +144,7 @@ export default function TileControls({ mapId, x, y, z, exists, onGenerate, onReg
       {/* Generate/Regenerate Modal */}
       <TileGenerateModal
         mapId={mapId}
+        timelineIndex={timelineIndex}
         open={generateModalOpen}
         onClose={() => setGenerateModalOpen(false)}
         x={x}

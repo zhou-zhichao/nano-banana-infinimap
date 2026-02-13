@@ -1,10 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z as zod } from "zod";
-import { db } from "@/lib/adapters/db.file";
+import { ZMAX } from "@/lib/coords";
 import { fileQueue } from "@/lib/adapters/queue.file";
 import { DEFAULT_MODEL_VARIANT, MODEL_VARIANTS } from "@/lib/modelVariant";
 import { isTileInBounds } from "@/lib/tilemaps/bounds";
 import { MapContextError, resolveMapContext } from "@/lib/tilemaps/context";
+import { parseTimelineIndexFromRequest, resolveTimelineContext } from "@/lib/timeline/context";
+import { markTimelineTilePending, resolveEffectiveTileMeta } from "@/lib/timeline/storage";
 
 const requestSchema = zod.object({
   prompt: zod.string().min(1, "Prompt is required"),
@@ -14,10 +16,13 @@ const requestSchema = zod.object({
 export async function POST(req: NextRequest, { params }: { params: Promise<{ z: string; x: string; y: string }> }) {
   let mapId = "default";
   let map: any = null;
+  let timelineIndex = 1;
+
   try {
     const resolved = await resolveMapContext(req);
     mapId = resolved.mapId;
     map = resolved.map;
+    timelineIndex = parseTimelineIndexFromRequest(req);
   } catch (error) {
     if (error instanceof MapContextError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
@@ -29,6 +34,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ z: 
   const z = Number(zStr);
   const x = Number(xStr);
   const y = Number(yStr);
+  if (z !== ZMAX) return NextResponse.json({ error: "Only max zoom tiles can be invalidated" }, { status: 400 });
   if (!isTileInBounds(map, z, x, y)) return NextResponse.json({ error: "Tile is outside map bounds" }, { status: 400 });
 
   const body = await req.json().catch(() => ({}));
@@ -38,11 +44,25 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ z: 
   }
   const { prompt, modelVariant = DEFAULT_MODEL_VARIANT } = parsed.data;
 
-  const t = await db.getTile(mapId, z, x, y);
-  if (!t) return NextResponse.json({ error: "Tile not found" }, { status: 404 });
+  const timeline = await resolveTimelineContext(mapId, timelineIndex);
+  const effective = await resolveEffectiveTileMeta(timeline, z, x, y);
+  if (effective.status === "EMPTY") {
+    return NextResponse.json({ error: "Tile not found" }, { status: 404 });
+  }
+  if (effective.status === "PENDING") {
+    return NextResponse.json({ ok: true, status: "ALREADY_PENDING", timelineIndex: timeline.index });
+  }
 
-  await db.updateTile(mapId, z, x, y, { status: "PENDING", contentVer: (t.contentVer ?? 0) + 1 });
-  await fileQueue.enqueue(`regen-${z}-${x}-${y}`, { mapId, z, x, y, prompt, modelVariant });
+  await markTimelineTilePending(mapId, timeline.node.id, z, x, y);
+  await fileQueue.enqueue(`regen-${timeline.node.id}-${z}-${x}-${y}`, {
+    mapId,
+    z,
+    x,
+    y,
+    prompt,
+    modelVariant,
+    timelineNodeId: timeline.node.id,
+  });
 
-  return NextResponse.json({ ok: true });
+  return NextResponse.json({ ok: true, timelineIndex: timeline.index });
 }

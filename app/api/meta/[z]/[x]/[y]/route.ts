@@ -1,15 +1,19 @@
 import { NextResponse } from "next/server";
-import { db } from "@/lib/adapters/db.file";
 import { isTileInBounds } from "@/lib/tilemaps/bounds";
 import { MapContextError, resolveMapContext } from "@/lib/tilemaps/context";
+import { parseTimelineIndexFromRequest, resolveTimelineContext } from "@/lib/timeline/context";
+import { resolveEffectiveTileMeta } from "@/lib/timeline/storage";
 
-export async function GET(req: Request, { params }:{params:Promise<{z:string,x:string,y:string}>}) {
+export async function GET(req: Request, { params }: { params: Promise<{ z: string; x: string; y: string }> }) {
   let mapId = "default";
   let map: any = null;
+  let timelineIndex = 1;
+
   try {
     const resolved = await resolveMapContext(req);
     mapId = resolved.mapId;
     map = resolved.map;
+    timelineIndex = parseTimelineIndexFromRequest(req);
   } catch (error) {
     if (error instanceof MapContextError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
@@ -18,15 +22,19 @@ export async function GET(req: Request, { params }:{params:Promise<{z:string,x:s
   }
 
   const { z: zStr, x: xStr, y: yStr } = await params;
-  const z = Number(zStr), x = Number(xStr), y = Number(yStr);
+  const z = Number(zStr);
+  const x = Number(xStr);
+  const y = Number(yStr);
   if (!isTileInBounds(map, z, x, y)) {
-    return NextResponse.json({ status: "EMPTY", hash: "EMPTY", updatedAt: null });
+    return NextResponse.json({ status: "EMPTY", hash: "EMPTY", updatedAt: null, timelineIndex });
   }
 
-  const t = await db.getTile(mapId, z, x, y);
+  const timeline = await resolveTimelineContext(mapId, timelineIndex);
+  const meta = await resolveEffectiveTileMeta(timeline, z, x, y);
   return NextResponse.json({
-    status: t?.status ?? "EMPTY",
-    hash: t?.hash ?? "EMPTY",
-    updatedAt: t?.updatedAt ?? null
+    status: meta.status,
+    hash: meta.hash,
+    updatedAt: meta.updatedAt,
+    timelineIndex: timeline.index,
   });
 }

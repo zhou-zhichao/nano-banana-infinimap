@@ -7,19 +7,20 @@ import { blake2sHex, hashTilePayload } from "./hashing";
 import { readTileFile, writeTileFile } from "./storage";
 import { tileGridSizeAtZoom } from "./tilemaps/bounds";
 import { getTilemapManifest } from "./tilemaps/service";
+import { TimelineContext } from "./timeline/types";
+import {
+  markTimelineTileTombstone,
+  readTimelineNodeMeta,
+  resolveEffectiveTileBuffer,
+  writeTimelineTileReady,
+} from "./timeline/storage";
 
 const DEFAULT_PATH = process.env.DEFAULT_TILE_PATH ?? "./public/default-tile.webp";
 
-export async function generateParentTile(mapId: string, z: number, x: number, y: number): Promise<Buffer | null> {
-  const children = childrenOf(z, x, y);
-  const childBuffers = await Promise.all(children.map((child) => readTileFile(mapId, child.z, child.x, child.y)));
-  const hasChildren = childBuffers.some((buffer) => buffer !== null);
-  if (!hasChildren) return null;
-
+async function composeParentTile(childBuffers: (Buffer | null)[]) {
   const defaultTile = await fs.readFile(path.resolve(DEFAULT_PATH));
   const tiles = childBuffers.map((buf) => buf ?? defaultTile);
 
-  let parentTile: Buffer;
   try {
     const topRow = await sharp(tiles[0])
       .resize(TILE, TILE, { fit: "fill" })
@@ -50,11 +51,19 @@ export async function generateParentTile(mapId: string, z: number, x: number, y:
       .composite([{ input: bottomRow, left: 0, top: TILE }])
       .toBuffer();
 
-    parentTile = await sharp(fullComposite).resize(TILE, TILE, { kernel: "lanczos3" }).webp({ quality: 85 }).toBuffer();
+    return await sharp(fullComposite).resize(TILE, TILE, { kernel: "lanczos3" }).webp({ quality: 85 }).toBuffer();
   } catch {
-    parentTile = await sharp(defaultTile).resize(TILE, TILE, { fit: "fill" }).webp({ quality: 85 }).toBuffer();
+    return sharp(defaultTile).resize(TILE, TILE, { fit: "fill" }).webp({ quality: 85 }).toBuffer();
   }
+}
 
+export async function generateParentTile(mapId: string, z: number, x: number, y: number): Promise<Buffer | null> {
+  const children = childrenOf(z, x, y);
+  const childBuffers = await Promise.all(children.map((child) => readTileFile(mapId, child.z, child.x, child.y)));
+  const hasChildren = childBuffers.some((buffer) => buffer !== null);
+  if (!hasChildren) return null;
+
+  const parentTile = await composeParentTile(childBuffers);
   await writeTileFile(mapId, z, x, y, parentTile);
 
   const bytesHash = blake2sHex(parentTile).slice(0, 16);
@@ -80,6 +89,40 @@ export async function generateParentTile(mapId: string, z: number, x: number, y:
   return parentTile;
 }
 
+export async function generateParentTileAtNode(
+  context: TimelineContext,
+  z: number,
+  x: number,
+  y: number,
+): Promise<Buffer | null> {
+  const children = childrenOf(z, x, y);
+  const childBuffers = await Promise.all(
+    children.map((child) => resolveEffectiveTileBuffer(context, child.z, child.x, child.y)),
+  );
+  const hasChildren = childBuffers.some((buffer) => buffer !== null);
+  if (!hasChildren) {
+    await markTimelineTileTombstone(context.mapId, context.node.id, z, x, y);
+    return null;
+  }
+
+  const parentTile = await composeParentTile(childBuffers);
+  const bytesHash = blake2sHex(parentTile).slice(0, 16);
+  const current = await readTimelineNodeMeta(context.mapId, context.node.id, z, x, y);
+  const contentVer = (current?.contentVer ?? 0) + 1;
+  const hash = hashTilePayload({
+    algorithmVersion: 1,
+    contentVer,
+    bytesHash,
+    seed: "parent",
+  });
+
+  await writeTimelineTileReady(context.mapId, context.node.id, z, x, y, parentTile, {
+    hash,
+    seed: "parent",
+  });
+  return parentTile;
+}
+
 export async function generateAllParentTiles(mapId: string) {
   const map = await getTilemapManifest(mapId);
   if (!map) throw new Error(`Tilemap "${mapId}" not found`);
@@ -89,9 +132,9 @@ export async function generateAllParentTiles(mapId: string) {
     for (let x = 0; x < width; x++) {
       for (let y = 0; y < height; y++) {
         const children = childrenOf(z, x, y);
-        const hasChildren = await Promise.all(children.map((child) => readTileFile(mapId, child.z, child.x, child.y))).then(
-          (buffers) => buffers.some((buffer) => buffer !== null),
-        );
+        const hasChildren = await Promise.all(
+          children.map((child) => readTileFile(mapId, child.z, child.x, child.y)),
+        ).then((buffers) => buffers.some((buffer) => buffer !== null));
         if (hasChildren) {
           await generateParentTile(mapId, z, x, y);
         }

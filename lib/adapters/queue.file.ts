@@ -16,21 +16,26 @@ async function ensureQueueDir(mapId: string) {
 const RUNNING = new Set<string>();
 
 export const fileQueue: Queue = {
-  async enqueue(name, payload) {
+  async enqueue(_name, payload) {
     await ensureQueueDir(payload.mapId);
-    // serialize per-tile; run job right away (in-process)
-    const key = `${payload.mapId}/${payload.z}/${payload.x}/${payload.y}`;
+    // serialize per-map+timeline+tile; run job right away (in-process)
+    const timelineKey = payload.timelineNodeId ?? "base";
+    const key = `${payload.mapId}/${timelineKey}/${payload.z}/${payload.x}/${payload.y}`;
     if (RUNNING.has(key)) {
       console.log(`Job already running for tile ${key}, skipping`);
       return; // ignore duplicate bursts
     }
     RUNNING.add(key);
     try {
-      await withFileLock(payload.mapId, `job_${key.replace(/\//g, '_')}`, async () => {
+      await withFileLock(payload.mapId, `job_${key.replace(/\//g, "_")}`, async () => {
         const res = await generateTile(payload.mapId, payload.z, payload.x, payload.y, payload.prompt, {
           modelVariant: payload.modelVariant,
+          timelineNodeId: payload.timelineNodeId,
         });
-        await bubbleHashes(payload.mapId, payload.z, payload.x, payload.y);
+        // Hash bubbling tracks baseline tree metadata only.
+        if (!payload.timelineNodeId) {
+          await bubbleHashes(payload.mapId, payload.z, payload.x, payload.y);
+        }
         return res;
       });
     } catch (error) {

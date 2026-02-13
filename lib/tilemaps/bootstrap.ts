@@ -1,11 +1,14 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { ZMAX } from "../coords";
-import { LEGACY_META_DIR, LEGACY_TILE_DIR } from "../paths";
+import { LEGACY_META_DIR, LEGACY_TILE_DIR, LEGACY_TIMELINE_DIR } from "../paths";
 import { BOOTSTRAP_VERSION, DEFAULT_MAP_ID, DEFAULT_MAP_NAME, MOON_HEIGHT, MOON_WIDTH } from "./constants";
 import {
   mapManifestPath,
   mapMetaDir,
+  mapTimelineDir,
+  mapTimelineManifestPath,
+  mapTimelineNodesDir,
   mapTilesDir,
   TILEMAP_BOOTSTRAP_MARKER,
   TILEMAPS_PRESET_MOON_ORPHANS_DIR,
@@ -125,6 +128,33 @@ async function migrateLegacyMetaToDefault() {
   return copied;
 }
 
+async function migrateLegacyTimelineToDefault() {
+  if (!(await pathExists(LEGACY_TIMELINE_DIR))) return { copiedManifest: false, copiedNodes: false };
+
+  const targetManifest = mapTimelineManifestPath(DEFAULT_MAP_ID);
+  const legacyManifest = path.join(LEGACY_TIMELINE_DIR, "manifest.json");
+  const legacyNodes = path.join(LEGACY_TIMELINE_DIR, "nodes");
+  const targetManifestExists = await pathExists(targetManifest);
+
+  let copiedManifest = false;
+  let copiedNodes = false;
+
+  await fs.mkdir(mapTimelineDir(DEFAULT_MAP_ID), { recursive: true });
+  await fs.mkdir(mapTimelineNodesDir(DEFAULT_MAP_ID), { recursive: true });
+
+  if (!targetManifestExists && (await pathExists(legacyManifest))) {
+    await fs.copyFile(legacyManifest, targetManifest).catch(() => {});
+    copiedManifest = true;
+  }
+
+  if (!targetManifestExists && (await pathExists(legacyNodes))) {
+    await fs.cp(legacyNodes, mapTimelineNodesDir(DEFAULT_MAP_ID), { recursive: true }).catch(() => {});
+    copiedNodes = true;
+  }
+
+  return { copiedManifest, copiedNodes };
+}
+
 async function writeMarker(payload: unknown) {
   await fs.mkdir(path.dirname(TILEMAP_BOOTSTRAP_MARKER), { recursive: true });
   await fs.writeFile(TILEMAP_BOOTSTRAP_MARKER, JSON.stringify(payload, null, 2));
@@ -138,17 +168,20 @@ async function runBootstrap() {
   const markerExists = await pathExists(TILEMAP_BOOTSTRAP_MARKER);
   if (markerExists) {
     await ensureDefaultTilemapFromMoon();
+    await migrateLegacyTimelineToDefault();
     return;
   }
 
   const tileMigration = await migrateLegacyMoonTiles();
   await ensureDefaultTilemapFromMoon();
   const metaCopied = await migrateLegacyMetaToDefault();
+  const timelineMigration = await migrateLegacyTimelineToDefault();
   await writeMarker({
     version: BOOTSTRAP_VERSION,
     createdAt: new Date().toISOString(),
     tileMigration,
     metaCopied,
+    timelineMigration,
     defaultManifestPath: mapManifestPath(DEFAULT_MAP_ID),
     moonPresetTilesDir: TILEMAPS_PRESET_MOON_TILES_DIR,
   });

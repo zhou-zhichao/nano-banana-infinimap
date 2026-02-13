@@ -15,6 +15,7 @@ const DEFAULT_BLANK_HEIGHT = 64;
 
 export default function TilemapSidebar({ tilemaps, activeMapId, onSelect, onCreated }: Props) {
   const [open, setOpen] = useState(false);
+  const [collapsed, setCollapsed] = useState(false);
   const [name, setName] = useState("");
   const [template, setTemplate] = useState<TilemapTemplate>("blank");
   const [width, setWidth] = useState(DEFAULT_BLANK_WIDTH);
@@ -59,43 +60,73 @@ export default function TilemapSidebar({ tilemaps, activeMapId, onSelect, onCrea
     }
   };
 
+  const openCreateModal = () => {
+    setOpen(true);
+    resetForm();
+  };
+
   return (
-    <aside className="w-72 border-r border-gray-200 bg-gray-50/90 h-full flex flex-col">
-      <div className="px-4 py-3 border-b border-gray-200 flex items-center justify-between">
-        <div>
-          <div className="text-sm font-semibold text-gray-900">Tilemaps</div>
-          <div className="text-xs text-gray-500">{items.length} total</div>
-        </div>
+    <aside
+      className={`${collapsed ? "w-14" : "w-72"} border-r border-gray-200 bg-gray-50/90 h-full flex flex-col transition-[width] duration-200`}
+    >
+      <div
+        className={`${collapsed ? "px-2 justify-center" : "px-4 justify-between"} py-3 border-b border-gray-200 flex items-center gap-2`}
+      >
+        {!collapsed && (
+          <div>
+            <div className="text-sm font-semibold text-gray-900">Tilemaps</div>
+            <div className="text-xs text-gray-500">{items.length} total</div>
+          </div>
+        )}
+
+        {!collapsed && (
+          <button className="h-8 px-3 rounded-md bg-blue-600 text-white text-xs font-medium hover:bg-blue-700" onClick={openCreateModal}>
+            New
+          </button>
+        )}
+
         <button
-          className="h-8 px-3 rounded-md bg-blue-600 text-white text-xs font-medium hover:bg-blue-700"
-          onClick={() => {
-            setOpen(true);
-            resetForm();
-          }}
+          className="h-8 w-8 rounded-md border border-gray-300 bg-white text-gray-700 text-sm hover:bg-gray-100"
+          onClick={() => setCollapsed((prev) => !prev)}
+          title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
         >
-          New
+          {collapsed ? ">" : "<"}
         </button>
       </div>
 
-      <div className="flex-1 overflow-auto p-2">
-        {items.map((item) => {
-          const active = item.id === activeMapId;
-          return (
-            <button
-              key={item.id}
-              className={`w-full text-left rounded-md px-3 py-2 mb-1 border transition-colors ${
-                active ? "bg-blue-600 text-white border-blue-700" : "bg-white text-gray-800 border-gray-200 hover:bg-gray-100"
-              }`}
-              onClick={() => onSelect(item.id)}
-            >
-              <div className="text-sm font-medium truncate">{item.name}</div>
-              <div className={`text-[11px] ${active ? "text-blue-100" : "text-gray-500"}`}>
-                {item.id} · {item.template} · {item.width}x{item.height}
-              </div>
-            </button>
-          );
-        })}
-      </div>
+      {collapsed ? (
+        <div className="flex-1 p-2 flex items-start justify-center">
+          <button
+            className="h-8 w-8 rounded-md bg-blue-600 text-white text-sm font-medium hover:bg-blue-700"
+            onClick={openCreateModal}
+            title="Create tilemap"
+            aria-label="Create tilemap"
+          >
+            +
+          </button>
+        </div>
+      ) : (
+        <div className="flex-1 overflow-auto p-2">
+          {items.map((item) => {
+            const active = item.id === activeMapId;
+            return (
+              <button
+                key={item.id}
+                className={`w-full text-left rounded-md px-3 py-2 mb-1 border transition-colors ${
+                  active ? "bg-blue-600 text-white border-blue-700" : "bg-white text-gray-800 border-gray-200 hover:bg-gray-100"
+                }`}
+                onClick={() => onSelect(item.id)}
+              >
+                <div className="text-sm font-medium truncate">{item.name}</div>
+                <div className={`text-[11px] ${active ? "text-blue-100" : "text-gray-500"}`}>
+                  {item.id} · {item.template} · {item.width}x{item.height}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      )}
 
       {open && (
         <div className="fixed inset-0 bg-black/30 z-[10020] flex items-center justify-center p-4">

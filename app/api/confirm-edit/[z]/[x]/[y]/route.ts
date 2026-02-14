@@ -6,6 +6,7 @@ import { z } from "zod";
 import { parentOf, TILE } from "@/lib/coords";
 import { estimateGridDriftFromExistingTiles, translateImage } from "@/lib/drift";
 import { blake2sHex } from "@/lib/hashing";
+import { shouldGenerateRealtimeParentTiles } from "@/lib/parentGenerationPolicy";
 import { generateParentTileAtNode } from "@/lib/parentTiles";
 import { isTileInBounds } from "@/lib/tilemaps/bounds";
 import { MapContextError, resolveMapContext } from "@/lib/tilemaps/context";
@@ -260,23 +261,25 @@ export async function POST(
       }
     }
 
-    let levelZ = z;
-    let currentLevel = new Set(updatedPositions.map((position) => `${position.x},${position.y}`));
-    while (levelZ > 0 && currentLevel.size > 0) {
-      const parents = new Map<string, { x: number; y: number }>();
-      for (const key of currentLevel) {
-        const [cx, cy] = key.split(",").map(Number);
-        const parent = parentOf(levelZ, cx, cy);
-        if (!isTileInBounds(map, levelZ - 1, parent.x, parent.y)) continue;
-        parents.set(`${parent.x},${parent.y}`, { x: parent.x, y: parent.y });
-      }
+    if (shouldGenerateRealtimeParentTiles(mapId)) {
+      let levelZ = z;
+      let currentLevel = new Set(updatedPositions.map((position) => `${position.x},${position.y}`));
+      while (levelZ > 0 && currentLevel.size > 0) {
+        const parents = new Map<string, { x: number; y: number }>();
+        for (const key of currentLevel) {
+          const [cx, cy] = key.split(",").map(Number);
+          const parent = parentOf(levelZ, cx, cy);
+          if (!isTileInBounds(map, levelZ - 1, parent.x, parent.y)) continue;
+          parents.set(`${parent.x},${parent.y}`, { x: parent.x, y: parent.y });
+        }
 
-      for (const parent of parents.values()) {
-        await generateParentTileAtNode(timeline, levelZ - 1, parent.x, parent.y);
-      }
+        for (const parent of parents.values()) {
+          await generateParentTileAtNode(timeline, levelZ - 1, parent.x, parent.y);
+        }
 
-      currentLevel = new Set(Array.from(parents.keys()));
-      levelZ -= 1;
+        currentLevel = new Set(Array.from(parents.keys()));
+        levelZ -= 1;
+      }
     }
 
     await fs.unlink(previewPath).catch(() => {});

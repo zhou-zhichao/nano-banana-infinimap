@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { ZMAX, parentOf } from "@/lib/coords";
+import { shouldGenerateRealtimeParentTiles } from "@/lib/parentGenerationPolicy";
 import { generateParentTileAtNode } from "@/lib/parentTiles";
 import { isTileInBounds } from "@/lib/tilemaps/bounds";
 import { MapContextError, resolveMapContext } from "@/lib/tilemaps/context";
@@ -39,15 +40,17 @@ export async function DELETE(req: NextRequest, { params }: { params: Promise<{ z
     const timeline = await resolveTimelineContext(mapId, timelineIndex);
     await markTimelineTileTombstone(mapId, timeline.node.id, z, x, y);
 
-    let cz = z;
-    let cx = x;
-    let cy = y;
-    while (cz > 0) {
-      const parent = parentOf(cz, cx, cy);
-      await generateParentTileAtNode(timeline, parent.z, parent.x, parent.y);
-      cz = parent.z;
-      cx = parent.x;
-      cy = parent.y;
+    if (shouldGenerateRealtimeParentTiles(mapId)) {
+      let cz = z;
+      let cx = x;
+      let cy = y;
+      while (cz > 0) {
+        const parent = parentOf(cz, cx, cy);
+        await generateParentTileAtNode(timeline, parent.z, parent.x, parent.y);
+        cz = parent.z;
+        cx = parent.x;
+        cy = parent.y;
+      }
     }
 
     return NextResponse.json({ ok: true, message: "Tile deleted", timelineIndex: timeline.index });

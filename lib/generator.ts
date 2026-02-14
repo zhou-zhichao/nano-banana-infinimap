@@ -7,6 +7,7 @@ import { loadStyleControl } from "./style";
 import { generateGridImage } from "./pythonImageService";
 import { DEFAULT_MODEL_VARIANT, ModelVariant } from "./modelVariant";
 import { resolveVertexModelForVariant } from "./serverModelResolver";
+import { shouldGenerateRealtimeParentTiles } from "./parentGenerationPolicy";
 import { resolveTimelineContextByNodeId } from "./timeline/context";
 import {
   markTimelineTilePending,
@@ -419,6 +420,11 @@ async function generateParentTilesForChild(
   y: number,
   timelineContext: TimelineContext | null,
 ) {
+  if (!shouldGenerateRealtimeParentTiles(mapId)) {
+    console.log(`  Skipping realtime parent generation for map:${mapId} (using preset parent levels)`);
+    return;
+  }
+
   const { generateParentTile, generateParentTileAtNode } = await import("./parentTiles");
   const { parentOf } = await import("./coords");
 

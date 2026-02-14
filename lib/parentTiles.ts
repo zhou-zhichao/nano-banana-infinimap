@@ -1,3 +1,5 @@
+import fs from "node:fs/promises";
+import path from "node:path";
 import sharp from "sharp";
 import { childrenOf, TILE, ZMAX } from "./coords";
 import { db } from "./adapters/db.file";
@@ -129,7 +131,7 @@ export async function generateAllParentTiles(mapId: string) {
         const children = childrenOf(z, x, y);
         const hasChildren = await Promise.all(
           children.map((child) => readTileFile(mapId, child.z, child.x, child.y)),
-        ).then((buffers) => buffers.some((buffer) => buffer !== null));
+        ).then((buffers: (Buffer | null)[]) => buffers.some((buffer) => buffer !== null));
         if (hasChildren) {
           await generateParentTile(mapId, z, x, y);
         }

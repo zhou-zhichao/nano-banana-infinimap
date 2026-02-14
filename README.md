@@ -159,6 +159,8 @@ corepack yarn regen:parents [mapId|preset:moon]
 - Use this after changing leaf/source tiles when you want refreshed parent levels.
 - This is a manual operation; it is not run automatically on app startup or map creation.
 - If a map target does not exist, the command exits with an error (for example: `Tilemap "..." not found`).
+- Missing/out-of-bounds tile fallback is transparent (not gray placeholder), so empty areas show the map container background.
+- If you previously saw parent-level white/gray blocks, run parent regeneration again to rebuild historical parent tiles with transparent fallback.
 
 ## Public Internet Access + Password
 

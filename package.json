@@ -2,6 +2,7 @@
   "name": "infinimap",
   "version": "0.1.0",
   "private": true,
+  "packageManager": "yarn@4.12.0",
   "scripts": {
     "dev": "node scripts/next-with-shell.cjs dev",
     "dev:web": "node scripts/next-with-shell.cjs dev",

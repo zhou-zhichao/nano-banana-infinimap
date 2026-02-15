@@ -52,6 +52,7 @@ type ModelInput = {
   prompt: string;
   styleName: string;
   neighbors: { dir: NeighborDir; buf: Buffer | null }[];
+  centerBuf: Buffer | null;
   seedHex: string;
   modelVariant: ModelVariant;
   requestedModel: string;
@@ -70,6 +71,19 @@ async function resolveGenerationTimelineContext(
   return resolveTimelineContextByNodeId(mapId, timelineNodeId);
 }
 
+async function readEffectiveTileBuffer(
+  mapId: string,
+  z: number,
+  x: number,
+  y: number,
+  timelineContext: TimelineContext | null,
+): Promise<Buffer | null> {
+  if (timelineContext) {
+    return resolveEffectiveTileBuffer(timelineContext, z, x, y);
+  }
+  return readTileFile(mapId, z, x, y);
+}
+
 async function getNeighbors(
   mapId: string,
   z: number,
@@ -79,16 +93,16 @@ async function getNeighbors(
 ) {
   const out: { dir: NeighborDir; buf: Buffer | null }[] = [];
   for (const [dir, dx, dy] of dirs) {
-    if (timelineContext) {
-      out.push({ dir, buf: await resolveEffectiveTileBuffer(timelineContext, z, x + dx, y + dy) });
-    } else {
-      out.push({ dir, buf: await readTileFile(mapId, z, x + dx, y + dy) });
-    }
+    const buf = await readEffectiveTileBuffer(mapId, z, x + dx, y + dy, timelineContext);
+    out.push({ dir, buf });
   }
   return out;
 }
 
-async function buildGridContextImage(neighbors: { dir: NeighborDir; buf: Buffer | null }[]): Promise<Buffer> {
+async function buildGridContextImage(
+  neighbors: { dir: NeighborDir; buf: Buffer | null }[],
+  centerBuf: Buffer | null,
+): Promise<Buffer> {
   const checkerboardSvg = `
     <svg width="${GRID_SIZE}" height="${GRID_SIZE}" xmlns="http://www.w3.org/2000/svg">
       <defs>
@@ -110,6 +124,10 @@ async function buildGridContextImage(neighbors: { dir: NeighborDir; buf: Buffer 
     const resized = await sharp(neighbor.buf).resize(TILE, TILE, { fit: "fill" }).toBuffer();
     overlays.push({ input: resized, left: pos.x, top: pos.y });
   }
+  if (centerBuf) {
+    const resizedCenter = await sharp(centerBuf).resize(TILE, TILE, { fit: "fill" }).toBuffer();
+    overlays.push({ input: resizedCenter, left: TILE, top: TILE });
+  }
 
   return sharp(Buffer.from(checkerboardSvg)).composite(overlays).png().toBuffer();
 }
@@ -130,7 +148,7 @@ async function runModel(input: ModelInput): Promise<Buffer> {
   console.log("  Requested model:", input.requestedModel);
 
   try {
-    const gridImage = await buildGridContextImage(input.neighbors);
+    const gridImage = await buildGridContextImage(input.neighbors, input.centerBuf);
     await writeDebugImage(`.debug/debug-grid-${input.seedHex}.png`, gridImage);
 
     const generated = await generateGridImage({
@@ -238,8 +256,11 @@ export async function generateTilePreview(
   const requestedModel = resolveVertexModelForVariant(modelVariant);
   const seedHex = blake2sHex(Buffer.from(`${z}:${x}:${y}:${styleName}:${prompt}:${modelVariant}`)).slice(0, 8);
 
-  const neighbors = await getNeighbors(mapId, z, x, y, timelineContext);
-  const buf = await runModel({ prompt, styleName, neighbors, seedHex, modelVariant, requestedModel });
+  const [neighbors, centerBuf] = await Promise.all([
+    getNeighbors(mapId, z, x, y, timelineContext),
+    readEffectiveTileBuffer(mapId, z, x, y, timelineContext),
+  ]);
+  const buf = await runModel({ prompt, styleName, neighbors, centerBuf, seedHex, modelVariant, requestedModel });
 
   console.log(`  Tile preview generated for z:${z} x:${x} y:${y}\n`);
   return buf;
@@ -268,10 +289,13 @@ export async function generateGridPreview(
   const modelVariant = options?.modelVariant ?? DEFAULT_MODEL_VARIANT;
   const requestedModel = resolveVertexModelForVariant(modelVariant);
   const seedHex = blake2sHex(Buffer.from(`${z}:${x}:${y}:${styleName}:${prompt}:${modelVariant}`)).slice(0, 8);
-  const neighbors = await getNeighbors(mapId, z, x, y, timelineContext);
+  const [neighbors, centerBuf] = await Promise.all([
+    getNeighbors(mapId, z, x, y, timelineContext),
+    readEffectiveTileBuffer(mapId, z, x, y, timelineContext),
+  ]);
 
   try {
-    const gridContext = await buildGridContextImage(neighbors);
+    const gridContext = await buildGridContextImage(neighbors, centerBuf);
     await writeDebugImage(`.debug/debug-grid-preview-${seedHex}.png`, gridContext);
 
     const generated = await generateGridImage({
@@ -292,7 +316,7 @@ export async function generateGridPreview(
       throw error;
     }
 
-    const center = await runModelStub({ prompt, styleName, neighbors, seedHex, modelVariant, requestedModel });
+    const center = await runModelStub({ prompt, styleName, neighbors, centerBuf, seedHex, modelVariant, requestedModel });
 
     const composites: sharp.OverlayOptions[] = [];
     const pos = [
@@ -362,8 +386,11 @@ export async function generateTile(
   const requestedModel = resolveVertexModelForVariant(modelVariant);
   const seedHex = blake2sHex(Buffer.from(`${z}:${x}:${y}:${styleName}:${prompt}:${modelVariant}`)).slice(0, 8);
 
-  const neighbors = await getNeighbors(mapId, z, x, y, timelineContext);
-  const buf = await runModel({ prompt, styleName, neighbors, seedHex, modelVariant, requestedModel });
+  const [neighbors, centerBuf] = await Promise.all([
+    getNeighbors(mapId, z, x, y, timelineContext),
+    readEffectiveTileBuffer(mapId, z, x, y, timelineContext),
+  ]);
+  const buf = await runModel({ prompt, styleName, neighbors, centerBuf, seedHex, modelVariant, requestedModel });
   const bytesHash = blake2sHex(buf).slice(0, 16);
 
   if (timelineContext) {

@@ -8,6 +8,8 @@ import { estimateGridDriftFromExistingTiles, translateImage } from "@/lib/drift"
 import { blake2sHex } from "@/lib/hashing";
 import { shouldGenerateRealtimeParentTiles } from "@/lib/parentGenerationPolicy";
 import { generateParentTileAtNode } from "@/lib/parentTiles";
+import { blendSeamGridImage, PythonImageServiceError } from "@/lib/pythonImageService";
+import { buildSeamBlendContext, extractSeamCenter3x3 } from "@/lib/seamBlendContext";
 import { isTileInBounds } from "@/lib/tilemaps/bounds";
 import { MapContextError, resolveMapContext } from "@/lib/tilemaps/context";
 import { parseTimelineIndexFromRequest, resolveTimelineContext } from "@/lib/timeline/context";
@@ -49,31 +51,6 @@ async function extractTiles(compositeBuffer: Buffer): Promise<Buffer[][]> {
   return tiles;
 }
 
-async function createCircularGradientMask(size: number): Promise<Buffer> {
-  const center = size / 2;
-  const radius = size / 2;
-  const width = size;
-  const height = size;
-  const channels = 4;
-  const buf = Buffer.alloc(width * height * channels);
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const dx = x - center;
-      const dy = y - center;
-      const d = Math.sqrt(dx * dx + dy * dy);
-      let alpha = 0;
-      if (d <= radius * 0.5) alpha = 255;
-      else if (d < radius) alpha = Math.round(255 * (1 - (d - radius * 0.5) / (radius * 0.5)));
-      const index = (y * width + x) * channels;
-      buf[index] = 255;
-      buf[index + 1] = 255;
-      buf[index + 2] = 255;
-      buf[index + 3] = alpha;
-    }
-  }
-  return sharp(buf, { raw: { width, height, channels: channels as 4 } }).png().toBuffer();
-}
-
 function previewIdFromUrl(previewUrl: string) {
   const match = previewUrl.match(/\/api\/preview\/([a-zA-Z0-9-]+)/);
   return match?.[1] ?? null;
@@ -82,6 +59,25 @@ function previewIdFromUrl(previewUrl: string) {
 async function readPreviewMeta(tempDir: string, previewId: string): Promise<PreviewMeta> {
   const raw = await fs.readFile(path.join(tempDir, `${previewId}.json`), "utf-8");
   return JSON.parse(raw) as PreviewMeta;
+}
+
+function extractPythonServiceMessage(error: PythonImageServiceError, fallback: string): string {
+  const responseBody = error.responseBody?.trim();
+  if (responseBody) {
+    try {
+      const parsed = JSON.parse(responseBody) as { detail?: unknown; error?: unknown };
+      if (typeof parsed.detail === "string" && parsed.detail.trim()) {
+        return parsed.detail.trim();
+      }
+      if (typeof parsed.error === "string" && parsed.error.trim()) {
+        return parsed.error.trim();
+      }
+    } catch {
+      return responseBody;
+    }
+    return responseBody;
+  }
+  return error.message || fallback;
 }
 
 export async function POST(
@@ -115,13 +111,8 @@ export async function POST(
 
     const timeline = await resolveTimelineContext(mapId, timelineIndex);
     const body = await req.json();
-    const { previewUrl, previewMode, applyToAllNew, newTilePositions, selectedPositions, offsetX, offsetY } =
-      requestSchema.parse(body);
+    const { previewUrl, previewMode, offsetX, offsetY } = requestSchema.parse(body);
     const effectivePreviewMode = previewMode ?? "blended";
-    const selectedSet =
-      effectivePreviewMode === "blended" && selectedPositions && selectedPositions.length > 0
-        ? new Set(selectedPositions.map((position) => `${position.x},${position.y}`))
-        : null;
 
     const previewId = previewIdFromUrl(previewUrl);
     if (!previewId) {
@@ -177,30 +168,28 @@ export async function POST(
         compositeBuffer = await translateImage(compositeBuffer, gridSize, gridSize, tx, ty);
         driftCorrection = { source: "manual", tx, ty, candidateCount: 0, confidence: 1 };
       } else {
-        let hasSelectedExisting = false;
+        let hasAnyExisting = false;
         outer: for (let dy = -1; dy <= 1; dy++) {
           for (let dx = -1; dx <= 1; dx++) {
             const tileX = centerX + dx;
             const tileY = centerY + dy;
             if (!isTileInBounds(map, z, tileX, tileY)) continue;
-            const key = `${tileX},${tileY}`;
-            if (selectedSet && !selectedSet.has(key)) continue;
             const existing = await resolveEffectiveTileBuffer(timeline, z, tileX, tileY);
             if (existing) {
-              hasSelectedExisting = true;
+              hasAnyExisting = true;
               break outer;
             }
           }
         }
 
-        if (hasSelectedExisting) {
+        if (hasAnyExisting) {
           try {
             const estimated = await estimateGridDriftFromExistingTiles({
               rawComposite: compositeBuffer,
               z,
               centerX,
               centerY,
-              selectedSet,
+              selectedSet: null,
               tileSize: TILE,
               readTile: (tileZ, tileX, tileY) => resolveEffectiveTileBuffer(timeline, tileZ, tileX, tileY),
             });
@@ -222,8 +211,27 @@ export async function POST(
       }
     }
 
+    if (effectivePreviewMode === "blended") {
+      const seamContext = await buildSeamBlendContext({
+        map,
+        timeline,
+        z,
+        centerX,
+        centerY,
+        rawComposite3x3: compositeBuffer,
+        tileSize: TILE,
+      });
+      const blended5x5 = await blendSeamGridImage({
+        basePng: seamContext.basePng,
+        overlayPng: seamContext.overlayPng,
+        overlayMaskPng: seamContext.overlayMaskPng,
+        tileSize: seamContext.tileSize,
+        centerOffsetTiles: seamContext.centerOffsetTiles,
+      });
+      compositeBuffer = await extractSeamCenter3x3(blended5x5.imageBuffer, TILE);
+    }
+
     const generatedTiles = await extractTiles(compositeBuffer);
-    const mask3x3 = effectivePreviewMode === "blended" ? await createCircularGradientMask(TILE * 3) : null;
     const updatedPositions: { x: number; y: number }[] = [];
 
     for (let dy = -1; dy <= 1; dy++) {
@@ -232,36 +240,7 @@ export async function POST(
         const tileY = centerY + dy;
         if (!isTileInBounds(map, z, tileX, tileY)) continue;
 
-        const key = `${tileX},${tileY}`;
-        const existingBuffer = await resolveEffectiveTileBuffer(timeline, z, tileX, tileY);
-        const exists = Boolean(existingBuffer);
-
-        if (effectivePreviewMode === "blended") {
-          if (selectedSet && !selectedSet.has(key)) continue;
-          if (
-            !selectedSet &&
-            !exists &&
-            !(applyToAllNew && newTilePositions && newTilePositions.length > 0) &&
-            !(dx === 0 && dy === 0)
-          ) {
-            continue;
-          }
-        }
-
-        let finalTile = generatedTiles[dy + 1][dx + 1];
-        if (effectivePreviewMode === "blended" && exists && existingBuffer && mask3x3) {
-          const tileMask = await sharp(mask3x3)
-            .extract({ left: (dx + 1) * TILE, top: (dy + 1) * TILE, width: TILE, height: TILE })
-            .png()
-            .toBuffer();
-          const maskedGenerated = await sharp(finalTile).composite([{ input: tileMask, blend: "dest-in" }]).webp().toBuffer();
-          finalTile = await sharp(existingBuffer)
-            .resize(TILE, TILE, { fit: "fill" })
-            .composite([{ input: maskedGenerated, blend: "over" }])
-            .webp()
-            .toBuffer();
-        }
-
+        const finalTile = generatedTiles[dy + 1][dx + 1];
         const hash = blake2sHex(finalTile);
         await writeTimelineTileReady(mapId, timeline.node.id, z, tileX, tileY, finalTile, { hash });
         updatedPositions.push({ x: tileX, y: tileY });
@@ -299,6 +278,13 @@ export async function POST(
       timelineIndex: timeline.index,
     });
   } catch (error) {
+    if (error instanceof PythonImageServiceError) {
+      const message = extractPythonServiceMessage(error, "Failed to blend tiles with OpenCV seam pipeline");
+      return NextResponse.json(
+        { error: message },
+        { status: error.statusCode || 500 },
+      );
+    }
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Failed to confirm edit" },
       { status: 500 },

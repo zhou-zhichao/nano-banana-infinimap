@@ -36,7 +36,7 @@ export function TileGenerateModal({ mapId, timelineIndex, open, onClose, x, y, z
   const [loading, setLoading] = useState(false);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [previewId, setPreviewId] = useState<string | null>(null);
-  const [blendPreview, setBlendPreview] = useState<boolean>(false);
+  const [blendPreview, setBlendPreview] = useState<boolean>(true);
   const [offsetX, setOffsetX] = useState<number>(0);
   const [offsetY, setOffsetY] = useState<number>(0);
   const [driftPeak, setDriftPeak] = useState<number | null>(null);
@@ -45,7 +45,6 @@ export function TileGenerateModal({ mapId, timelineIndex, open, onClose, x, y, z
   const [error, setError] = useState<string | null>(null);
   const [loadingTiles, setLoadingTiles] = useState(true);
   const [newTilePositions, setNewTilePositions] = useState<Set<string>>(new Set());
-  const [selectedPositions, setSelectedPositions] = useState<Set<string>>(new Set());
   const [activeTab, setActiveTab] = useState<string>("preview");
   const [rateLimit, setRateLimit] = useState<RateLimitStatusResponse | null>(null);
   const [rateLimitError, setRateLimitError] = useState<string | null>(null);
@@ -145,60 +144,121 @@ export function TileGenerateModal({ mapId, timelineIndex, open, onClose, x, y, z
       
       setTiles(newTiles);
       setNewTilePositions(newPositions);
-      // Reset selections when opening or coordinates change
-      setSelectedPositions(new Set());
       setLoadingTiles(false);
     };
     
     loadTiles();
   }, [mapId, open, timelineIndex, withMapTimeline, x, y, z]);
 
+  const toErrorMessage = (err: unknown, fallback: string): string => {
+    if (err instanceof Error && err.message.trim()) {
+      return err.message;
+    }
+    return fallback;
+  };
+
+  const parseErrorPayload = (rawText: string): string | null => {
+    const trimmed = rawText.trim();
+    if (!trimmed) return null;
+    try {
+      const parsed = JSON.parse(trimmed) as { detail?: unknown; error?: unknown };
+      if (typeof parsed.detail === "string" && parsed.detail.trim()) {
+        return parsed.detail.trim();
+      }
+      if (typeof parsed.error === "string" && parsed.error.trim()) {
+        return parsed.error.trim();
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  };
+
+  const readErrorMessageFromResponse = async (response: Response, fallback: string): Promise<string> => {
+    const bodyText = await response.text().catch(() => "");
+    if (!bodyText) {
+      return fallback;
+    }
+    const parsed = parseErrorPayload(bodyText);
+    if (parsed) {
+      return parsed;
+    }
+    return bodyText.trim() || fallback;
+  };
+
   // Extract 9 tiles from a composite image
   const extractTilesFromComposite = async (compositeUrl: string): Promise<string[][]> => {
-    return new Promise((resolve, reject) => {
-      const img = new Image();
-      img.crossOrigin = "anonymous";
-      img.onload = () => {
-        const extractedTiles: string[][] = [];
-        
-        // Calculate scale in case image is not exactly 768x768
-        const expectedSize = TILE_SIZE * 3; // 768
-        const scaleX = img.width / expectedSize;
-        const scaleY = img.height / expectedSize;
-        
-        for (let dy = 0; dy < 3; dy++) {
-          const row: string[] = [];
-          for (let dx = 0; dx < 3; dx++) {
-            const canvas = document.createElement('canvas');
-            canvas.width = TILE_SIZE;
-            canvas.height = TILE_SIZE;
-            const ctx = canvas.getContext('2d');
-            if (ctx) {
-              // Scale source coordinates if needed
-              const sx = dx * TILE_SIZE * scaleX;
-              const sy = dy * TILE_SIZE * scaleY;
-              const sw = TILE_SIZE * scaleX;
-              const sh = TILE_SIZE * scaleY;
-              
-              ctx.drawImage(
-                img,
-                sx, sy, sw, sh,                   // source rect (scaled if needed)
-                0, 0, TILE_SIZE, TILE_SIZE       // destination rect (always 256x256)
-              );
-              row.push(canvas.toDataURL('image/webp'));
-            }
-          }
-          extractedTiles.push(row);
+    const response = await fetch(compositeUrl, { cache: "no-store" });
+    if (!response.ok) {
+      const message = await readErrorMessageFromResponse(
+        response,
+        `Preview request failed (HTTP ${response.status})`,
+      );
+      throw new Error(`Preview failed: ${message}`);
+    }
+
+    const contentType = (response.headers.get("content-type") || "").toLowerCase();
+    if (!contentType.startsWith("image/")) {
+      const message = await readErrorMessageFromResponse(
+        response,
+        `Expected image/* response but got ${contentType || "unknown content-type"}`,
+      );
+      throw new Error(`Preview failed: ${message}`);
+    }
+
+    const blob = await response.blob();
+    const objectUrl = URL.createObjectURL(blob);
+
+    let img: HTMLImageElement;
+    try {
+      img = await new Promise<HTMLImageElement>((resolve, reject) => {
+        const decoded = new Image();
+        decoded.onload = () => resolve(decoded);
+        decoded.onerror = () => reject(new Error("Preview image decode failed"));
+        decoded.src = objectUrl;
+      });
+    } finally {
+      URL.revokeObjectURL(objectUrl);
+    }
+
+    const extractedTiles: string[][] = [];
+    const expectedSize = TILE_SIZE * GRID_SIZE;
+    const scaleX = img.width / expectedSize;
+    const scaleY = img.height / expectedSize;
+
+    for (let dy = 0; dy < GRID_SIZE; dy++) {
+      const row: string[] = [];
+      for (let dx = 0; dx < GRID_SIZE; dx++) {
+        const canvas = document.createElement("canvas");
+        canvas.width = TILE_SIZE;
+        canvas.height = TILE_SIZE;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+          throw new Error("Preview image decode failed");
         }
-        
-        resolve(extractedTiles);
-      };
-      img.onerror = (err) => {
-        console.error('Failed to load composite image:', err);
-        reject(err);
-      };
-      img.src = compositeUrl;
-    });
+
+        const sx = dx * TILE_SIZE * scaleX;
+        const sy = dy * TILE_SIZE * scaleY;
+        const sw = TILE_SIZE * scaleX;
+        const sh = TILE_SIZE * scaleY;
+
+        ctx.drawImage(
+          img,
+          sx,
+          sy,
+          sw,
+          sh,
+          0,
+          0,
+          TILE_SIZE,
+          TILE_SIZE,
+        );
+        row.push(canvas.toDataURL("image/webp"));
+      }
+      extractedTiles.push(row);
+    }
+
+    return extractedTiles;
   };
 
   const loadPreviewTiles = async (id: string, blended: boolean, txOverride?: number, tyOverride?: number) => {
@@ -216,20 +276,15 @@ export function TileGenerateModal({ mapId, timelineIndex, open, onClose, x, y, z
     setPreviewUrl(url);
     const extractedTiles = await extractTilesFromComposite(url);
     setPreviewTiles(extractedTiles);
-    // Initialize default selection on first load: select all tiles by default
-    setSelectedPositions(prev => {
-      if (prev.size > 0) return prev;
-      const sel = new Set<string>();
-      for (let dy = -1; dy <= 1; dy++) {
-        for (let dx = -1; dx <= 1; dx++) {
-          const tileX = x + dx;
-          const tileY = y + dy;
-          const key = `${tileX},${tileY}`;
-          sel.add(key);
-        }
-      }
-      return sel;
-    });
+  };
+
+  const safeLoadPreviewTiles = async (id: string, blended: boolean, txOverride?: number, tyOverride?: number) => {
+    try {
+      await loadPreviewTiles(id, blended, txOverride, tyOverride);
+      setError(null);
+    } catch (err) {
+      setError(toErrorMessage(err, "Failed to load preview tiles"));
+    }
   };
 
   // Utility: turn a data URL into a Blob
@@ -247,22 +302,19 @@ export function TileGenerateModal({ mapId, timelineIndex, open, onClose, x, y, z
       const rawTiles = await extractTilesFromComposite(rawUrl);
       if (!tiles || !rawTiles) return;
 
-      // Choose only selected positions that already exist
+      // Use all existing positions in the 3x3 neighborhood.
       const pairs: { ex: string; gen: string }[] = [];
-      const positionsUsed: string[] = [];
       for (let dy = -1; dy <= 1; dy++) {
         for (let dx = -1; dx <= 1; dx++) {
           const tileX = x + dx;
           const tileY = y + dy;
           const key = `${tileX},${tileY}`;
-          const selected = selectedPositions.size > 0 ? selectedPositions.has(key) : true; // default to all existing
           const exists = !newTilePositions.has(key);
-          if (!selected || !exists) continue;
+          if (!exists) continue;
           const ex = tiles[dy + 1]?.[dx + 1];
           const gen = rawTiles[dy + 1]?.[dx + 1];
           if (ex && gen) {
             pairs.push({ ex, gen });
-            positionsUsed.push(key);
           }
         }
       }
@@ -337,7 +389,7 @@ export function TileGenerateModal({ mapId, timelineIndex, open, onClose, x, y, z
       // Default to no drift correction until user opts-in
       await loadPreviewTiles(data.previewId, blendPreview);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "An error occurred");
+      setError(toErrorMessage(err, "An error occurred"));
     } finally {
       setLoading(false);
     }
@@ -356,21 +408,23 @@ export function TileGenerateModal({ mapId, timelineIndex, open, onClose, x, y, z
         body: JSON.stringify({ 
           previewUrl: withMapTimeline(`/api/preview/${previewId}`),
           previewMode,
-          selectedPositions:
-            previewMode === "blended"
-              ? Array.from(selectedPositions).map(s => { const [sx,sy] = s.split(',').map(Number); return { x: sx, y: sy }; })
-              : undefined,
           offsetX: previewMode === "blended" && nudgeApplied ? Math.round(offsetX) : undefined,
           offsetY: previewMode === "blended" && nudgeApplied ? Math.round(offsetY) : undefined,
         }),
       });
-      if (!response.ok) throw new Error("Failed to confirm edits");
+      if (!response.ok) {
+        const message = await readErrorMessageFromResponse(
+          response,
+          `Failed to confirm edits (HTTP ${response.status})`,
+        );
+        throw new Error(message);
+      }
       
       onUpdate();
       handleReset();
       handleClose();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to confirm");
+      setError(toErrorMessage(err, "Failed to confirm"));
     } finally {
       setLoading(false);
     }
@@ -406,7 +460,7 @@ export function TileGenerateModal({ mapId, timelineIndex, open, onClose, x, y, z
       // Default to no drift correction until user opts-in
       await loadPreviewTiles(data.previewId, blendPreview);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "An error occurred");
+      setError(toErrorMessage(err, "An error occurred"));
     } finally {
       setLoading(false);
     }
@@ -415,7 +469,7 @@ export function TileGenerateModal({ mapId, timelineIndex, open, onClose, x, y, z
   const handleReset = () => {
     setPrompt("");
     setModelVariant(DEFAULT_MODEL_VARIANT);
-    setBlendPreview(false);
+    setBlendPreview(true);
     setPreviewUrl(null);
     setPreviewId(null);
     setPreviewTiles(null);
@@ -579,14 +633,16 @@ export function TileGenerateModal({ mapId, timelineIndex, open, onClose, x, y, z
                                 name="blendMode"
                                 className="accent-blue-600"
                                 checked={!blendPreview}
-                                onChange={async () => {
+                                onChange={() => {
                                   setBlendPreview(false);
                                   setNudgeOpen(false);
                                   setNudgeApplied(false);
                                   setOffsetX(0);
                                   setOffsetY(0);
                                   setDriftPeak(null);
-                                  if (previewId) await loadPreviewTiles(previewId, false);
+                                  if (previewId) {
+                                    void safeLoadPreviewTiles(previewId, false);
+                                  }
                                 }}
                               />
                               Raw
@@ -597,9 +653,11 @@ export function TileGenerateModal({ mapId, timelineIndex, open, onClose, x, y, z
                                 name="blendMode"
                                 className="accent-blue-600"
                                 checked={blendPreview}
-                                onChange={async () => {
+                                onChange={() => {
                                   setBlendPreview(true);
-                                  if (previewId) await loadPreviewTiles(previewId, true);
+                                  if (previewId) {
+                                    void safeLoadPreviewTiles(previewId, true);
+                                  }
                                 }}
                               />
                               Blended
@@ -643,42 +701,21 @@ export function TileGenerateModal({ mapId, timelineIndex, open, onClose, x, y, z
                               const tileX = x + dx - 1;
                               const tileY = y + dy - 1;
                               const tileExists = !newTilePositions.has(`${tileX},${tileY}`);
-                              const key = `${tileX},${tileY}`;
-                              const selected = selectedPositions.has(key);
-                              const willApply = previewTiles ? (blendPreview ? selected : true) : false;
-                              const imgSrc = previewTiles ? (willApply ? tileData : tiles[dy][dx]) : tiles[dy][dx];
+                              const imgSrc = previewTiles ? tileData : tiles[dy][dx];
 
                               return (
                                 <div key={`${dx}-${dy}`} className="relative w-full h-full">
                                   <img src={imgSrc} alt={`Tile ${tileX},${tileY}`} className="block w-full h-full object-cover" />
-                                  {/* Hover overlay controls for selection + tags (hover-only) */}
+                                  {/* Hover-only tile source tag for blended preview */}
                                   {previewTiles && blendPreview && (
                                     <div className="pointer-events-none absolute inset-0 opacity-0 group-hover:opacity-100 group-hover:pointer-events-auto transition-opacity duration-150">
                                       <div className="flex items-start justify-between p-1">
-                                        {/* Tag pill shows only on hover */}
                                         <span
                                           className="px-1.5 py-0.5 rounded-md text-[10px] font-medium text-white shadow"
                                           style={{ backgroundColor: tileExists ? '#3b82f6' : '#10b981' }}
                                         >
                                           {tileExists ? 'EXISTING' : 'NEW'}
                                         </span>
-                                        <label className="flex items-center gap-1 bg-white/80 rounded-md px-1.5 py-0.5 shadow text-[10px] cursor-pointer select-none">
-                                          <input
-                                            type="checkbox"
-                                            className="w-3 h-3"
-                                            checked={selected}
-                                            onChange={(e) => {
-                                              const checked = e.target.checked;
-                                              setSelectedPositions(prev => {
-                                                const next = new Set(prev);
-                                                if (checked) next.add(key); else next.delete(key);
-                                                next.add(`${x},${y}`); // center must be selected
-                                                return next;
-                                              });
-                                            }}
-                                          />
-                                          {selected ? 'Apply' : 'Skip'}
-                                        </label>
                                       </div>
                                     </div>
                                   )}
@@ -705,12 +742,12 @@ export function TileGenerateModal({ mapId, timelineIndex, open, onClose, x, y, z
                         <Tooltip.Root>
                           <Tooltip.Trigger asChild>
                             <span className="inline-flex items-center gap-1 px-2 h-7 rounded-full bg-gray-100 text-gray-700 text-[11px] font-medium">
-                              {selectedPositions.size}/9
+                              3x3 fixed
                             </span>
                           </Tooltip.Trigger>
                           <Tooltip.Portal>
                             <Tooltip.Content sideOffset={6} className="z-[10002] bg-gray-900 text-white px-2 py-1 rounded text-xs">
-                              Selected {selectedPositions.size} of 9 tiles to apply
+                              Blended mode applies the fixed 3x3 seam result
                               <Tooltip.Arrow className="fill-gray-900" />
                             </Tooltip.Content>
                           </Tooltip.Portal>
@@ -739,7 +776,7 @@ export function TileGenerateModal({ mapId, timelineIndex, open, onClose, x, y, z
                         </Tooltip.Trigger>
                         <Tooltip.Portal>
                           <Tooltip.Content sideOffset={6} className="z-[10002] bg-gray-900 text-white px-2 py-1 rounded text-xs">
-                            Preview mode: {blendPreview ? 'Blended (existing tiles fade to edges)' : 'Raw model output (applies full 3x3 directly)'}
+                            Preview mode: {blendPreview ? 'Blended applies fixed 3x3 seam result' : 'Raw model output (applies full 3x3 directly)'}
                             <Tooltip.Arrow className="fill-gray-900" />
                           </Tooltip.Content>
                         </Tooltip.Portal>
@@ -818,7 +855,7 @@ export function TileGenerateModal({ mapId, timelineIndex, open, onClose, x, y, z
 
                     <button
                       onClick={handleAccept}
-                      disabled={loading || !previewTiles || (blendPreview && selectedPositions.size === 0)}
+                      disabled={loading || !previewTiles}
                       className="h-8 px-3 rounded-md text-xs bg-green-600 text-white hover:bg-green-700 disabled:bg-gray-300 disabled:cursor-not-allowed inline-flex items-center gap-1.5"
                     >
                       <Check className="w-4 h-4" />
@@ -836,11 +873,13 @@ export function TileGenerateModal({ mapId, timelineIndex, open, onClose, x, y, z
                         type="number"
                         className="w-16 h-7 border rounded px-1"
                         value={offsetX}
-                        onChange={async (e) => {
+                        onChange={(e) => {
                           const v = parseInt(e.target.value, 10) || 0;
                           setOffsetX(v);
                           setNudgeApplied(true);
-                          if (previewId && blendPreview) await loadPreviewTiles(previewId, true);
+                          if (previewId && blendPreview) {
+                            void safeLoadPreviewTiles(previewId, true, v, offsetY);
+                          }
                         }}
                       />
                     </div>
@@ -850,11 +889,13 @@ export function TileGenerateModal({ mapId, timelineIndex, open, onClose, x, y, z
                         type="number"
                         className="w-16 h-7 border rounded px-1"
                         value={offsetY}
-                        onChange={async (e) => {
+                        onChange={(e) => {
                           const v = parseInt(e.target.value, 10) || 0;
                           setOffsetY(v);
                           setNudgeApplied(true);
-                          if (previewId && blendPreview) await loadPreviewTiles(previewId, true);
+                          if (previewId && blendPreview) {
+                            void safeLoadPreviewTiles(previewId, true, offsetX, v);
+                          }
                         }}
                       />
                     </div>
@@ -865,7 +906,9 @@ export function TileGenerateModal({ mapId, timelineIndex, open, onClose, x, y, z
                         if (previewId) {
                           const suggestion = await computeDrift(previewId);
                           setNudgeApplied(true);
-                          if (blendPreview) await loadPreviewTiles(previewId, true, suggestion?.tx, suggestion?.ty);
+                          if (blendPreview) {
+                            await safeLoadPreviewTiles(previewId, true, suggestion?.tx, suggestion?.ty);
+                          }
                         }
                       }}
                     >
@@ -876,7 +919,7 @@ export function TileGenerateModal({ mapId, timelineIndex, open, onClose, x, y, z
                       <span className="text-gray-500">Peak {driftPeak.toFixed(3)}</span>
                     )}
                     <span className="text-gray-500">
-                      Using {Array.from(selectedPositions).filter(k => !newTilePositions.has(k)).length} existing selected tile(s)
+                      Using all existing tiles in 3x3 for drift estimation
                     </span>
                   </div>
                 )}

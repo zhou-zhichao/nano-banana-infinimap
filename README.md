@@ -36,6 +36,8 @@ python -m venv .venv
 .venv\Scripts\pip install -r pyservice/requirements.txt
 ```
 
+`pyservice/requirements.txt` now includes `opencv-contrib-python-headless` for seam finding + multi-band blending in blended preview/apply mode.
+
 3. Create local environment file:
 
 ```bash
@@ -97,6 +99,8 @@ GEMINI_RATE_LIMIT_ENABLED="1"
 GEMINI_RATE_LIMIT_STATE_PATH=".temp/gemini-rate-limit-state.json"
 GEMINI_RATE_LIMIT_DEFAULTS_JSON='{"nano_banana":{"rpm":500,"rpd":2000},"nano_banana_pro":{"rpm":20,"rpd":250}}'
 GEMINI_RATE_LIMIT_POLL_MS="5000"
+SEAM_BAND_PX="48"
+SEAM_MULTIBAND_NUM_BANDS="5"
 ALLOW_STUB_FALLBACK="0"
 ```
 
@@ -242,6 +246,9 @@ Expected result includes:
 - `VERTEX_MODEL_FALLBACKS` is comma-separated and optional.
 - Defaults are tuned for responsiveness (`IMAGE` only, `1K`, server stream timeout 90s).
 - Stub tile fallback is disabled by default (`ALLOW_STUB_FALLBACK="0"`), so generation errors are visible instead of silent solid-color tiles.
+- Blended preview/apply now uses OpenCV `GraphCutSeamFinder + MultiBandBlender` over a `5x5` context and then writes back a fixed center `3x3`.
+- Blended mode no longer supports per-tile apply/skip; it always applies the in-bounds center `3x3` seam result.
+- Seam tuning env vars: `SEAM_BAND_PX` (default `48`) and `SEAM_MULTIBAND_NUM_BANDS` (default `5`).
 - Rate limit responses are surfaced as `429` with `Retry-After`, instead of being collapsed into generic `500`.
 - Sidebar (`/map`) shows aggregated `RPM/RPD` for `Nano Banana` and `Nano Banana Pro`.
 - Next.js proxy endpoint `/api/rate-limit-status` reads Python `/v1/rate-limit-status` for frontend polling.

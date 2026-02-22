@@ -78,6 +78,20 @@ class GenerateGridResponse(BaseModel):
     latency_ms: int
 
 
+class BlendSeamGridRequest(BaseModel):
+    base_png_base64: str = Field(min_length=1)
+    overlay_png_base64: str = Field(min_length=1)
+    overlay_mask_png_base64: str = Field(min_length=1)
+    tile_size: int = Field(default=256, ge=1, le=4096)
+    center_offset_tiles: int = Field(default=1, ge=0, le=8)
+
+
+class BlendSeamGridResponse(BaseModel):
+    image_base64: str
+    mime_type: str
+    latency_ms: int
+
+
 class RateLimitCounter(BaseModel):
     used: int
     limit: int
@@ -1000,6 +1014,35 @@ async def healthz() -> dict:
 @app.get("/v1/rate-limit-status", response_model=RateLimitStatusResponse)
 async def rate_limit_status() -> RateLimitStatusResponse:
     return RateLimitStatusResponse.model_validate(get_gemini_rate_limit_status_payload())
+
+
+@app.post("/v1/blend-seam-grid", response_model=BlendSeamGridResponse)
+def blend_seam_grid(payload: BlendSeamGridRequest) -> BlendSeamGridResponse:
+    start = time.perf_counter()
+    try:
+        from .seam_blend import blend_seam_grid_base64
+
+        blended_png = blend_seam_grid_base64(
+            base_png_base64=payload.base_png_base64,
+            overlay_png_base64=payload.overlay_png_base64,
+            overlay_mask_png_base64=payload.overlay_mask_png_base64,
+            tile_size=payload.tile_size,
+            center_offset_tiles=payload.center_offset_tiles,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover - runtime integration path
+        logger.exception("Seam blend request failed")
+        raise HTTPException(status_code=500, detail=f"Seam blend request failed: {exc}") from exc
+
+    latency_ms = int((time.perf_counter() - start) * 1000)
+    return BlendSeamGridResponse(
+        image_base64=base64.b64encode(blended_png).decode("ascii"),
+        mime_type="image/png",
+        latency_ms=latency_ms,
+    )
 
 
 @app.post("/v1/generate-grid", response_model=GenerateGridResponse)

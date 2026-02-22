@@ -4,10 +4,16 @@ const DEFAULT_SERVICE_URL = "http://127.0.0.1:8001";
 const DEFAULT_TIMEOUT_MS = 120_000;
 const DEFAULT_MAX_ATTEMPTS = 1;
 
-const serviceResponseSchema = z.object({
+const generateGridResponseSchema = z.object({
   image_base64: z.string().min(1),
   mime_type: z.string().min(1),
   model: z.string().min(1),
+  latency_ms: z.number().int().nonnegative(),
+});
+
+const blendSeamGridResponseSchema = z.object({
+  image_base64: z.string().min(1),
+  mime_type: z.literal("image/png"),
   latency_ms: z.number().int().nonnegative(),
 });
 
@@ -23,6 +29,20 @@ type GenerateGridImageOutput = {
   imageBuffer: Buffer;
   mimeType: string;
   model: string;
+  latencyMs: number;
+};
+
+type BlendSeamGridImageInput = {
+  basePng: Buffer;
+  overlayPng: Buffer;
+  overlayMaskPng: Buffer;
+  tileSize?: number;
+  centerOffsetTiles?: number;
+};
+
+type BlendSeamGridImageOutput = {
+  imageBuffer: Buffer;
+  mimeType: "image/png";
   latencyMs: number;
 };
 
@@ -94,11 +114,15 @@ function isRetryableError(error: unknown): boolean {
   );
 }
 
-export async function generateGridImage(input: GenerateGridImageInput): Promise<GenerateGridImageOutput> {
+async function postJsonWithRetry<T>(
+  path: string,
+  body: unknown,
+  responseSchema: z.ZodType<T>,
+): Promise<T> {
   const serviceUrl = getServiceUrl();
   const timeoutMs = getTimeoutMs();
   const maxAttempts = getMaxAttempts();
-  const endpoint = `${serviceUrl.replace(/\/$/, "")}/v1/generate-grid`;
+  const endpoint = `${serviceUrl.replace(/\/$/, "")}${path}`;
 
   let lastError: unknown;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
@@ -111,13 +135,7 @@ export async function generateGridImage(input: GenerateGridImageInput): Promise<
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({
-          prompt: input.prompt,
-          style_name: input.styleName,
-          grid_png_base64: input.gridPng.toString("base64"),
-          negative_prompt: input.negativePrompt ?? "",
-          ...(input.model ? { model: input.model } : {}),
-        }),
+        body: JSON.stringify(body),
         signal: controller.signal,
       });
 
@@ -133,13 +151,7 @@ export async function generateGridImage(input: GenerateGridImageInput): Promise<
         });
       }
 
-      const parsed = serviceResponseSchema.parse(JSON.parse(responseText));
-      return {
-        imageBuffer: Buffer.from(parsed.image_base64, "base64"),
-        mimeType: parsed.mime_type,
-        model: parsed.model,
-        latencyMs: parsed.latency_ms,
-      };
+      return responseSchema.parse(JSON.parse(responseText));
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") {
         error = new PythonImageServiceError(`Python image service request timed out after ${timeoutMs}ms`, {
@@ -169,7 +181,48 @@ export async function generateGridImage(input: GenerateGridImageInput): Promise<
   if (lastError instanceof PythonImageServiceError) {
     throw lastError;
   }
-  throw new PythonImageServiceError(`Failed to generate image from Python service: ${String(lastError)}`, {
+  throw new PythonImageServiceError(`Failed to call Python image service: ${String(lastError)}`, {
     cause: lastError,
   });
+}
+
+export async function generateGridImage(input: GenerateGridImageInput): Promise<GenerateGridImageOutput> {
+  const parsed = await postJsonWithRetry(
+    "/v1/generate-grid",
+    {
+      prompt: input.prompt,
+      style_name: input.styleName,
+      grid_png_base64: input.gridPng.toString("base64"),
+      negative_prompt: input.negativePrompt ?? "",
+      ...(input.model ? { model: input.model } : {}),
+    },
+    generateGridResponseSchema,
+  );
+
+  return {
+    imageBuffer: Buffer.from(parsed.image_base64, "base64"),
+    mimeType: parsed.mime_type,
+    model: parsed.model,
+    latencyMs: parsed.latency_ms,
+  };
+}
+
+export async function blendSeamGridImage(input: BlendSeamGridImageInput): Promise<BlendSeamGridImageOutput> {
+  const parsed = await postJsonWithRetry(
+    "/v1/blend-seam-grid",
+    {
+      base_png_base64: input.basePng.toString("base64"),
+      overlay_png_base64: input.overlayPng.toString("base64"),
+      overlay_mask_png_base64: input.overlayMaskPng.toString("base64"),
+      tile_size: input.tileSize ?? 256,
+      center_offset_tiles: input.centerOffsetTiles ?? 1,
+    },
+    blendSeamGridResponseSchema,
+  );
+
+  return {
+    imageBuffer: Buffer.from(parsed.image_base64, "base64"),
+    mimeType: parsed.mime_type,
+    latencyMs: parsed.latency_ms,
+  };
 }

@@ -4,6 +4,8 @@ import { NextRequest, NextResponse } from "next/server";
 import sharp from "sharp";
 import { TILE } from "@/lib/coords";
 import { alignCompositeOverBase, translateImage } from "@/lib/drift";
+import { blendSeamGridImage, PythonImageServiceError } from "@/lib/pythonImageService";
+import { buildSeamBlendContext, extractSeamCenter3x3 } from "@/lib/seamBlendContext";
 import { isTileInBounds } from "@/lib/tilemaps/bounds";
 import { ensureTilemapsBootstrap } from "@/lib/tilemaps/bootstrap";
 import { DEFAULT_MAP_ID } from "@/lib/tilemaps/constants";
@@ -23,29 +25,17 @@ type PreviewMeta = {
   createdAt: string;
 };
 
-async function createCircularGradientMask(size: number): Promise<Buffer> {
-  const center = size / 2;
-  const radius = size / 2;
-  const width = size;
-  const height = size;
-  const channels = 4;
-  const buf = Buffer.alloc(width * height * channels);
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const dx = x - center;
-      const dy = y - center;
-      const distance = Math.sqrt(dx * dx + dy * dy);
-      let alpha = 0;
-      if (distance <= radius * 0.5) alpha = 255;
-      else if (distance < radius) alpha = Math.round(255 * (1 - (distance - radius * 0.5) / (radius * 0.5)));
-      const index = (y * width + x) * channels;
-      buf[index] = 255;
-      buf[index + 1] = 255;
-      buf[index + 2] = 255;
-      buf[index + 3] = alpha;
-    }
-  }
-  return sharp(buf, { raw: { width, height, channels: channels as 4 } }).png().toBuffer();
+async function createTransparentTilePng(): Promise<Buffer> {
+  return sharp({
+    create: {
+      width: TILE_SIZE,
+      height: TILE_SIZE,
+      channels: 4,
+      background: { r: 0, g: 0, b: 0, alpha: 0 },
+    },
+  })
+    .png()
+    .toBuffer();
 }
 
 async function composite3x3(tiles: Buffer[][]): Promise<Buffer> {
@@ -57,10 +47,15 @@ async function composite3x3(tiles: Buffer[][]): Promise<Buffer> {
     }
   }
   return sharp({
-    create: { width: gridSize, height: gridSize, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } },
+    create: {
+      width: gridSize,
+      height: gridSize,
+      channels: 4,
+      background: { r: 0, g: 0, b: 0, alpha: 0 },
+    },
   })
     .composite(overlays)
-    .webp()
+    .png()
     .toBuffer();
 }
 
@@ -72,6 +67,25 @@ async function readPreviewMeta(previewId: string) {
   const tempDir = path.join(process.cwd(), ".temp");
   const raw = await fs.readFile(path.join(tempDir, `${previewId}.json`), "utf-8");
   return JSON.parse(raw) as PreviewMeta;
+}
+
+function extractPythonServiceMessage(error: PythonImageServiceError, fallback: string): string {
+  const responseBody = error.responseBody?.trim();
+  if (responseBody) {
+    try {
+      const parsed = JSON.parse(responseBody) as { detail?: unknown; error?: unknown };
+      if (typeof parsed.detail === "string" && parsed.detail.trim()) {
+        return parsed.detail.trim();
+      }
+      if (typeof parsed.error === "string" && parsed.error.trim()) {
+        return parsed.error.trim();
+      }
+    } catch {
+      return responseBody;
+    }
+    return responseBody;
+  }
+  return error.message || fallback;
 }
 
 export async function GET(req: NextRequest, context: { params: Promise<{ id: string }> }) {
@@ -119,7 +133,7 @@ export async function GET(req: NextRequest, context: { params: Promise<{ id: str
     const centerX = previewMeta.x;
     const centerY = previewMeta.y;
     const gridSize = TILE_SIZE * 3;
-    const mask = await createCircularGradientMask(gridSize);
+    const transparentTile = await createTransparentTilePng();
 
     const baseTiles: Buffer[][] = [];
     for (let gy = 0; gy < 3; gy++) {
@@ -128,26 +142,14 @@ export async function GET(req: NextRequest, context: { params: Promise<{ id: str
         const tileX = centerX + gx - 1;
         const tileY = centerY + gy - 1;
         if (!isTileInBounds(map, z, tileX, tileY)) {
-          row.push(
-            await sharp({
-              create: { width: TILE_SIZE, height: TILE_SIZE, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } },
-            })
-              .png()
-              .toBuffer(),
-          );
+          row.push(transparentTile);
           continue;
         }
         const existing = await resolveEffectiveTileBuffer(previewTimeline, z, tileX, tileY);
         if (existing) {
           row.push(await sharp(existing).resize(TILE_SIZE, TILE_SIZE, { fit: "fill" }).png().toBuffer());
         } else {
-          row.push(
-            await sharp({
-              create: { width: TILE_SIZE, height: TILE_SIZE, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } },
-            })
-              .png()
-              .toBuffer(),
-          );
+          row.push(transparentTile);
         }
       }
       baseTiles.push(row);
@@ -166,55 +168,38 @@ export async function GET(req: NextRequest, context: { params: Promise<{ id: str
       }
     }
 
-    const output: Buffer[][] = [];
-    for (let dy = 0; dy < 3; dy++) {
-      const row: Buffer[] = [];
-      for (let dx = 0; dx < 3; dx++) {
-        const tileX = centerX + dx - 1;
-        const tileY = centerY + dy - 1;
-        if (!isTileInBounds(map, z, tileX, tileY)) {
-          row.push(
-            await sharp({
-              create: { width: TILE_SIZE, height: TILE_SIZE, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } },
-            })
-              .webp()
-              .toBuffer(),
-          );
-          continue;
-        }
+    const seamContext = await buildSeamBlendContext({
+      map,
+      timeline: previewTimeline,
+      z,
+      centerX,
+      centerY,
+      rawComposite3x3: await sharp(effectiveRaw).png().toBuffer(),
+      tileSize: TILE_SIZE,
+    });
+    const blended5x5 = await blendSeamGridImage({
+      basePng: seamContext.basePng,
+      overlayPng: seamContext.overlayPng,
+      overlayMaskPng: seamContext.overlayMaskPng,
+      tileSize: seamContext.tileSize,
+      centerOffsetTiles: seamContext.centerOffsetTiles,
+    });
+    const blendedCenter3x3 = await extractSeamCenter3x3(blended5x5.imageBuffer, TILE_SIZE);
+    const blendedComposite = await sharp(blendedCenter3x3).webp().toBuffer();
 
-        const existing = await resolveEffectiveTileBuffer(previewTimeline, z, tileX, tileY);
-        const rawTile = await sharp(effectiveRaw)
-          .extract({ left: dx * TILE_SIZE, top: dy * TILE_SIZE, width: TILE_SIZE, height: TILE_SIZE })
-          .webp()
-          .toBuffer();
-
-        if (existing) {
-          const tileMask = await sharp(mask)
-            .extract({ left: dx * TILE_SIZE, top: dy * TILE_SIZE, width: TILE_SIZE, height: TILE_SIZE })
-            .png()
-            .toBuffer();
-          const masked = await sharp(rawTile).composite([{ input: tileMask, blend: "dest-in" }]).webp().toBuffer();
-          const blended = await sharp(existing)
-            .resize(TILE_SIZE, TILE_SIZE, { fit: "fill" })
-            .composite([{ input: masked, blend: "over" }])
-            .webp()
-            .toBuffer();
-          row.push(blended);
-        } else {
-          row.push(rawTile);
-        }
-      }
-      output.push(row);
-    }
-
-    const blendedComposite = await composite3x3(output);
     return new NextResponse(blendedComposite as any, {
       headers: { "Content-Type": "image/webp", "Cache-Control": "private, max-age=60" },
     });
   } catch (error) {
     if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
       return NextResponse.json({ error: "Preview not found" }, { status: 404 });
+    }
+    if (error instanceof PythonImageServiceError) {
+      const message = extractPythonServiceMessage(error, "Failed to blend preview with OpenCV seam pipeline");
+      return NextResponse.json(
+        { error: message },
+        { status: error.statusCode || 500 },
+      );
     }
     console.error("Preview fetch error:", error);
     return NextResponse.json({ error: "Failed to fetch preview" }, { status: 500 });

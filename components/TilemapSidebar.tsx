@@ -3,18 +3,20 @@
 import { useEffect, useMemo, useState } from "react";
 import type { TilemapManifest, TilemapTemplate } from "@/lib/tilemaps/types";
 import { formatCounter, toPercent, type RateLimitStatusResponse } from "@/lib/rateLimitStatus";
+import { DEFAULT_MAP_ID } from "@/lib/tilemaps/constants";
 
 type Props = {
   tilemaps: TilemapManifest[];
   activeMapId: string;
   onSelect: (mapId: string) => void;
   onCreated: (map: TilemapManifest) => void;
+  onDeleted: (mapId: string) => void;
 };
 
 const DEFAULT_BLANK_WIDTH = 64;
 const DEFAULT_BLANK_HEIGHT = 64;
 
-export default function TilemapSidebar({ tilemaps, activeMapId, onSelect, onCreated }: Props) {
+export default function TilemapSidebar({ tilemaps, activeMapId, onSelect, onCreated, onDeleted }: Props) {
   const [open, setOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
   const [name, setName] = useState("");
@@ -23,6 +25,8 @@ export default function TilemapSidebar({ tilemaps, activeMapId, onSelect, onCrea
   const [height, setHeight] = useState(DEFAULT_BLANK_HEIGHT);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [deletingMapId, setDeletingMapId] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [rateLimit, setRateLimit] = useState<RateLimitStatusResponse | null>(null);
   const [rateLimitError, setRateLimitError] = useState<string | null>(null);
 
@@ -108,6 +112,31 @@ export default function TilemapSidebar({ tilemaps, activeMapId, onSelect, onCrea
   const openCreateModal = () => {
     setOpen(true);
     resetForm();
+  };
+
+  const removeTilemap = async (map: TilemapManifest) => {
+    if (map.id === DEFAULT_MAP_ID) return;
+    const confirmed = window.confirm(`Delete tilemap "${map.name}"? This cannot be undone.`);
+    if (!confirmed) return;
+
+    setDeleteError(null);
+    setDeletingMapId(map.id);
+    try {
+      const response = await fetch("/api/tilemaps", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mapId: map.id }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data?.error || "Failed to delete tilemap");
+      }
+      onDeleted(map.id);
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : "Failed to delete tilemap");
+    } finally {
+      setDeletingMapId(null);
+    }
   };
 
   return (
@@ -198,21 +227,39 @@ export default function TilemapSidebar({ tilemaps, activeMapId, onSelect, onCrea
             )}
           </div>
 
+          {deleteError && <div className="mb-2 rounded-md border border-red-200 bg-red-50 px-2 py-1 text-xs text-red-700">{deleteError}</div>}
+
           {items.map((item) => {
             const active = item.id === activeMapId;
+            const deleting = deletingMapId === item.id;
             return (
-              <button
-                key={item.id}
-                className={`w-full text-left rounded-md px-3 py-2 mb-1 border transition-colors ${
-                  active ? "bg-blue-600 text-white border-blue-700" : "bg-white text-gray-800 border-gray-200 hover:bg-gray-100"
-                }`}
-                onClick={() => onSelect(item.id)}
-              >
-                <div className="text-sm font-medium truncate">{item.name}</div>
-                <div className={`text-[11px] ${active ? "text-blue-100" : "text-gray-500"}`}>
-                  {item.id} · {item.template} · {item.width}x{item.height}
-                </div>
-              </button>
+              <div key={item.id} className="mb-1 flex items-stretch gap-1">
+                <button
+                  className={`flex-1 text-left rounded-md px-3 py-2 border transition-colors ${
+                    active ? "bg-blue-600 text-white border-blue-700" : "bg-white text-gray-800 border-gray-200 hover:bg-gray-100"
+                  }`}
+                  onClick={() => onSelect(item.id)}
+                >
+                  <div className="text-sm font-medium truncate">{item.name}</div>
+                  <div className={`text-[11px] ${active ? "text-blue-100" : "text-gray-500"}`}>
+                    {item.id} · {item.template} · {item.width}x{item.height}
+                  </div>
+                </button>
+
+                {item.id !== DEFAULT_MAP_ID && (
+                  <button
+                    className="w-14 rounded-md border border-red-200 bg-red-50 text-[11px] font-medium text-red-700 hover:bg-red-100 disabled:opacity-60"
+                    onClick={() => {
+                      void removeTilemap(item);
+                    }}
+                    disabled={deletingMapId !== null}
+                    title="Delete tilemap"
+                    aria-label="Delete tilemap"
+                  >
+                    {deleting ? "..." : "Delete"}
+                  </button>
+                )}
+              </div>
             );
           })}
         </div>

@@ -140,3 +140,21 @@ export async function createTilemap(input: CreateTilemapInput): Promise<TilemapM
 
   return manifest;
 }
+
+export async function deleteTilemap(mapId: string): Promise<TilemapManifest> {
+  await ensureTilemapRootDirs();
+  if (!isValidMapId(mapId)) {
+    throw new Error("Invalid tilemap id");
+  }
+  if (mapId === DEFAULT_MAP_ID) {
+    throw new Error("Default tilemap cannot be deleted");
+  }
+
+  const manifest = await readTilemapManifest(mapId);
+  if (!manifest) {
+    throw new Error(`Tilemap "${mapId}" not found`);
+  }
+
+  await fs.rm(mapRootDir(mapId), { recursive: true, force: true });
+  return manifest;
+}

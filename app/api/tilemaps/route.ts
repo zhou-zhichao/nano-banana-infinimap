@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { ensureTilemapsBootstrap } from "@/lib/tilemaps/bootstrap";
-import { createTilemap, listTilemaps } from "@/lib/tilemaps/service";
+import { createTilemap, deleteTilemap, listTilemaps } from "@/lib/tilemaps/service";
 
 const CreateBody = z
   .object({
@@ -18,6 +18,10 @@ const CreateBody = z
       });
     }
   });
+
+const DeleteBody = z.object({
+  mapId: z.string().min(1).max(63),
+});
 
 export async function GET() {
   await ensureTilemapsBootstrap();
@@ -39,5 +43,23 @@ export async function POST(req: NextRequest) {
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to create tilemap";
     return NextResponse.json({ error: message }, { status: 400 });
+  }
+}
+
+export async function DELETE(req: NextRequest) {
+  await ensureTilemapsBootstrap();
+  const body = await req.json().catch(() => ({}));
+  const parsed = DeleteBody.safeParse(body);
+  if (!parsed.success) {
+    return NextResponse.json({ error: parsed.error.issues[0]?.message ?? "Invalid input" }, { status: 400 });
+  }
+
+  try {
+    const deleted = await deleteTilemap(parsed.data.mapId);
+    return NextResponse.json({ item: deleted });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to delete tilemap";
+    const status = message.includes("not found") ? 404 : 400;
+    return NextResponse.json({ error: message }, { status });
   }
 }

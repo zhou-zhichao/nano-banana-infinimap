@@ -75,9 +75,19 @@ export default function MapWorkspace() {
     [selectMap],
   );
 
+  const handleDeleted = useCallback((mapId: string) => {
+    setTilemaps((prev) => prev.filter((item) => item.id !== mapId));
+  }, []);
+
   return (
     <main className="w-screen h-screen flex overflow-hidden">
-      <TilemapSidebar tilemaps={tilemaps} activeMapId={activeMap?.id || activeMapId} onSelect={selectMap} onCreated={handleCreated} />
+      <TilemapSidebar
+        tilemaps={tilemaps}
+        activeMapId={activeMap?.id || activeMapId}
+        onSelect={selectMap}
+        onCreated={handleCreated}
+        onDeleted={handleDeleted}
+      />
       <section className="flex-1 min-w-0">
         {loading && <div className="h-full grid place-items-center text-sm text-gray-500">Loading tilemaps...</div>}
         {!loading && error && <div className="h-full grid place-items-center text-sm text-red-600">{error}</div>}

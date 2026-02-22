@@ -26,7 +26,7 @@ export default function TimelineBar({
   onDeleteActive,
 }: TimelineBarProps) {
   return (
-    <div className="absolute bottom-3 left-1/2 -translate-x-1/2 z-[1500] w-[min(96vw,980px)] pointer-events-none">
+    <div data-timeline-bar className="absolute bottom-3 left-1/2 -translate-x-1/2 z-[1500] w-[min(96vw,980px)] pointer-events-none">
       <div className="pointer-events-auto rounded-2xl border border-gray-200 bg-white/95 shadow-xl backdrop-blur px-3 py-2">
         <div className="flex items-center gap-2 mb-2">
           <div className="text-xs font-medium text-gray-700">Timeline</div>

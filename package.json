@@ -11,6 +11,7 @@
     "build": "node scripts/next-with-shell.cjs build",
     "start": "node scripts/next-with-shell.cjs start",
     "lint": "next lint",
+    "test:batch": "node scripts/test-batch.cjs",
     "check:parent-policy": "node scripts/check-parent-policy.cjs",
     "regen:parents": "node scripts/regen-parents.cjs",
     "tools:moon:import": "python tools/import_nasa_moon_tiles.py",

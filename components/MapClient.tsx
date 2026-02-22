@@ -5,6 +5,10 @@ import dynamic from "next/dynamic";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams as useSearchParamsHook } from "next/navigation";
 import TimelineBar from "./TimelineBar";
+import BatchGenerateModal, { type BatchGenerateOptions } from "./BatchGenerateModal";
+import BatchStatusPanel from "./BatchStatusPanel";
+import { startBatchRun, type BatchRunHandle } from "@/lib/batch/executor";
+import type { BatchRunState, TileBounds } from "@/lib/batch/types";
 
 const TileControls = dynamic(() => import("./TileControls"), { ssr: false });
 const MAX_Z = Number(process.env.NEXT_PUBLIC_ZMAX ?? 8);
@@ -73,6 +77,10 @@ export default function MapClient({ mapId, mapWidth, mapHeight }: Props) {
   const [timelineLoading, setTimelineLoading] = useState(false);
   const [activeTimelineIndex, setActiveTimelineIndex] = useState(() => parsePositiveInt(searchParams?.get("t") ?? null, 1));
   const activeTimelineRef = useRef(activeTimelineIndex);
+  const [batchModalOpen, setBatchModalOpen] = useState(false);
+  const [batchOrigin, setBatchOrigin] = useState<{ x: number; y: number } | null>(null);
+  const [batchState, setBatchState] = useState<BatchRunState | null>(null);
+  const batchHandleRef = useRef<BatchRunHandle | null>(null);
 
   const timelineKey = useCallback((timelineIndex: number, x: number, y: number) => `${timelineIndex}:${x},${y}`, []);
 
@@ -91,6 +99,13 @@ export default function MapClient({ mapId, mapWidth, mapHeight }: Props) {
   useEffect(() => {
     activeTimelineRef.current = activeTimelineIndex;
   }, [activeTimelineIndex]);
+
+  useEffect(() => {
+    return () => {
+      batchHandleRef.current?.cancel();
+      batchHandleRef.current = null;
+    };
+  }, []);
 
   const isMaxZoomTileInBounds = useCallback(
     (x: number, y: number) => x >= 0 && y >= 0 && x < mapWidth && y < mapHeight,
@@ -175,6 +190,76 @@ export default function MapClient({ mapId, mapWidth, mapHeight }: Props) {
       tileLayer?.setUrl?.(nextUrl);
     },
     [mapId],
+  );
+
+  const fitMapToLeafBounds = useCallback((tileBounds: TileBounds | null) => {
+    if (!tileBounds || !mapRef.current) return;
+    const mapInstance = mapRef.current;
+    const southWest = mapInstance.unproject([tileBounds.minX * 256, (tileBounds.maxY + 1) * 256] as any, MAX_Z);
+    const northEast = mapInstance.unproject([(tileBounds.maxX + 1) * 256, tileBounds.minY * 256] as any, MAX_Z);
+    mapInstance.fitBounds(
+      [
+        [southWest.lat, southWest.lng],
+        [northEast.lat, northEast.lng],
+      ],
+      { padding: [24, 24] },
+    );
+  }, []);
+
+  const cancelBatchRun = useCallback(() => {
+    batchHandleRef.current?.cancel();
+  }, []);
+
+  const startBatchGenerate = useCallback(
+    async (options: BatchGenerateOptions) => {
+      const origin = batchOrigin ?? selectedTileRef.current;
+      if (!origin) {
+        throw new Error("No anchor tile selected");
+      }
+
+      batchHandleRef.current?.cancel();
+      const runTimeline = activeTimelineRef.current;
+      let observedWaveCount = -1;
+
+      const handle = startBatchRun({
+        mapId,
+        timelineIndex: runTimeline,
+        z: MAX_Z,
+        originX: origin.x,
+        originY: origin.y,
+        mapWidth,
+        mapHeight,
+        layers: options.layers,
+        maxParallel: options.maxParallel,
+        prompt: options.prompt,
+        modelVariant: options.modelVariant,
+        onState: (nextState) => {
+          setBatchState(nextState);
+          if (nextState.waves.length !== observedWaveCount) {
+            observedWaveCount = nextState.waves.length;
+            void refreshVisibleTiles(runTimeline);
+          }
+        },
+      });
+
+      batchHandleRef.current = handle;
+      const initialState = handle.getState();
+      setBatchState(initialState);
+      fitMapToLeafBounds(initialState.coverageBounds);
+      setBatchModalOpen(false);
+
+      void handle.done
+        .then((finalState) => {
+          setBatchState(finalState);
+          void refreshVisibleTiles(runTimeline);
+        })
+        .finally(() => {
+          if (batchHandleRef.current === handle) {
+            batchHandleRef.current = null;
+          }
+        });
+    },
+    [batchOrigin, fitMapToLeafBounds, mapHeight, mapId, mapWidth, refreshVisibleTiles],
   );
 
   const pollTileStatus = useCallback(
@@ -508,6 +593,8 @@ export default function MapClient({ mapId, mapWidth, mapHeight }: Props) {
     };
   }, [checkTileExists, isMaxZoomTileInBounds, mapHeight, mapId, mapWidth, timelineKey, updateURL, writeUrlState]);
 
+  const batchRunning = batchState?.status === "RUNNING" || batchState?.status === "COMPLETING";
+
   return (
     <div className="w-full h-full relative">
       <div className="p-3 z-10 absolute top-2 left-2 bg-white/90 rounded-xl shadow-lg flex flex-col gap-2">
@@ -559,6 +646,10 @@ export default function MapClient({ mapId, mapWidth, mapHeight }: Props) {
               onGenerate={(prompt) => handleGenerate(selectedTile.x, selectedTile.y, prompt)}
               onRegenerate={(prompt) => handleRegenerate(selectedTile.x, selectedTile.y, prompt)}
               onDelete={() => handleDelete(selectedTile.x, selectedTile.y)}
+              onBatchGenerate={() => {
+                setBatchOrigin({ x: selectedTile.x, y: selectedTile.y });
+                setBatchModalOpen(true);
+              }}
               onRefreshTiles={() => {
                 const t = activeTimelineRef.current;
                 setTimeout(() => {
@@ -570,6 +661,19 @@ export default function MapClient({ mapId, mapWidth, mapHeight }: Props) {
           </div>
         </div>
       )}
+
+      {batchOrigin && (
+        <BatchGenerateModal
+          open={batchModalOpen}
+          running={batchRunning}
+          originX={batchOrigin.x}
+          originY={batchOrigin.y}
+          onClose={() => setBatchModalOpen(false)}
+          onSubmit={startBatchGenerate}
+        />
+      )}
+
+      <BatchStatusPanel state={batchState} onCancel={cancelBatchRun} />
 
       {timelineNodes.length > 0 && (
         <TimelineBar

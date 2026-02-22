@@ -23,6 +23,7 @@ const requestSchema = z.object({
   selectedPositions: z.array(z.object({ x: z.number(), y: z.number() })).optional(),
   offsetX: z.number().optional(),
   offsetY: z.number().optional(),
+  skipParentRefresh: z.boolean().optional(),
 });
 
 type PreviewMeta = {
@@ -111,7 +112,7 @@ export async function POST(
 
     const timeline = await resolveTimelineContext(mapId, timelineIndex);
     const body = await req.json();
-    const { previewUrl, previewMode, offsetX, offsetY } = requestSchema.parse(body);
+    const { previewUrl, previewMode, offsetX, offsetY, skipParentRefresh = false } = requestSchema.parse(body);
     const effectivePreviewMode = previewMode ?? "blended";
 
     const previewId = previewIdFromUrl(previewUrl);
@@ -247,7 +248,7 @@ export async function POST(
       }
     }
 
-    if (shouldGenerateRealtimeParentTiles(mapId, "confirm-edit")) {
+    if (!skipParentRefresh && shouldGenerateRealtimeParentTiles(mapId, "confirm-edit")) {
       let levelZ = z;
       let currentLevel = new Set(updatedPositions.map((position) => `${position.x},${position.y}`));
       while (levelZ > 0 && currentLevel.size > 0) {

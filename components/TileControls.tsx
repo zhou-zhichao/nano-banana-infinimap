@@ -15,6 +15,7 @@ interface TileControlsProps {
   onRegenerate: (prompt: string) => Promise<void>;
   onDelete: () => Promise<void>;
   onRefreshTiles?: () => void;
+  onBatchGenerate?: () => void;
 }
 
 export default function TileControls({
@@ -28,6 +29,7 @@ export default function TileControls({
   onRegenerate,
   onDelete,
   onRefreshTiles,
+  onBatchGenerate,
 }: TileControlsProps) {
   const [generateModalOpen, setGenerateModalOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
@@ -48,6 +50,29 @@ export default function TileControls({
   return (
     <div className="flex gap-1">
       <Tooltip.Provider delayDuration={300}>
+        {onBatchGenerate && (
+          <Tooltip.Root>
+            <Tooltip.Trigger asChild>
+              <button
+                className="w-7 h-7 rounded border border-amber-700 bg-amber-500 hover:bg-amber-600 text-white flex items-center justify-center transition-all hover:scale-110 hover:shadow-lg"
+                title="Batch generate 3x3"
+                onClick={onBatchGenerate}
+              >
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                  <path d="M3 3h3v3H3V3Zm0 7h3v3H3v-3Zm7-7h3v3h-3V3Zm0 7h3v3h-3v-3Z" fill="currentColor" />
+                  <path d="M7 7h2v2H7V7Z" fill="currentColor" />
+                </svg>
+              </button>
+            </Tooltip.Trigger>
+            <Tooltip.Portal>
+              <Tooltip.Content className="bg-gray-900 text-white px-2 py-1 rounded text-xs leading-none z-[10002]" sideOffset={5}>
+                Batch generate
+                <Tooltip.Arrow className="fill-gray-900" />
+              </Tooltip.Content>
+            </Tooltip.Portal>
+          </Tooltip.Root>
+        )}
+
         {!exists ? (
           // Generate button for empty tiles
           <Tooltip.Root>

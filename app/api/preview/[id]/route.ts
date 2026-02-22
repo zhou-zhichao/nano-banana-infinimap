@@ -69,6 +69,18 @@ async function readPreviewMeta(previewId: string) {
   return JSON.parse(raw) as PreviewMeta;
 }
 
+async function unlinkIfExists(filePath: string) {
+  try {
+    await fs.unlink(filePath);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+      return false;
+    }
+    throw error;
+  }
+}
+
 function extractPythonServiceMessage(error: PythonImageServiceError, fallback: string): string {
   const responseBody = error.responseBody?.trim();
   if (responseBody) {
@@ -203,5 +215,42 @@ export async function GET(req: NextRequest, context: { params: Promise<{ id: str
     }
     console.error("Preview fetch error:", error);
     return NextResponse.json({ error: "Failed to fetch preview" }, { status: 500 });
+  }
+}
+
+export async function DELETE(req: NextRequest, context: { params: Promise<{ id: string }> }) {
+  try {
+    const { id } = await context.params;
+    const previewId = parsePreviewId(id);
+    if (!previewId) {
+      return NextResponse.json({ error: "Invalid preview ID" }, { status: 400 });
+    }
+
+    const requestedMapId = new URL(req.url).searchParams.get("mapId");
+    const tempDir = path.join(process.cwd(), ".temp");
+    const previewPath = path.join(tempDir, `${previewId}.webp`);
+    const metaPath = path.join(tempDir, `${previewId}.json`);
+
+    if (requestedMapId && requestedMapId.trim()) {
+      const previewMeta = await readPreviewMeta(previewId).catch(() => null);
+      if (!previewMeta) {
+        return NextResponse.json({ success: true, removed: false, previewId });
+      }
+      if (previewMeta.mapId !== requestedMapId) {
+        return NextResponse.json({ error: "Preview map mismatch" }, { status: 400 });
+      }
+    }
+
+    const [removedPreview, removedMeta] = await Promise.all([unlinkIfExists(previewPath), unlinkIfExists(metaPath)]);
+    return NextResponse.json({
+      success: true,
+      previewId,
+      removed: removedPreview || removedMeta,
+    });
+  } catch (error) {
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : "Failed to delete preview" },
+      { status: 500 },
+    );
   }
 }

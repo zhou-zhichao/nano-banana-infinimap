@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import * as Tabs from "@radix-ui/react-tabs";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
@@ -27,27 +27,53 @@ interface TileGenerateModalProps {
 }
 
 const TILE_SIZE = 256;
-const GRID_SIZE = 3;
+const VIEW_SPAN = 5;
+const VIEW_RADIUS = Math.floor(VIEW_SPAN / 2);
+const PREVIEW_SPAN = 3;
+const PREVIEW_RADIUS = Math.floor(PREVIEW_SPAN / 2);
+const PREVIEW_INSERT_OFFSET = VIEW_RADIUS - PREVIEW_RADIUS;
+
+function composePreviewGrid5x5(contextTiles5x5: string[][], previewCenter3x3: string[][] | null): string[][] {
+  const composed = contextTiles5x5.map((row) => row.slice());
+  if (!previewCenter3x3) {
+    return composed;
+  }
+
+  for (let dy = 0; dy < PREVIEW_SPAN; dy++) {
+    for (let dx = 0; dx < PREVIEW_SPAN; dx++) {
+      const source = previewCenter3x3[dy]?.[dx];
+      if (!source) continue;
+      const targetY = dy + PREVIEW_INSERT_OFFSET;
+      const targetX = dx + PREVIEW_INSERT_OFFSET;
+      if (!composed[targetY] || !composed[targetY][targetX]) continue;
+      composed[targetY][targetX] = source;
+    }
+  }
+
+  return composed;
+}
 
 export function TileGenerateModal({ mapId, timelineIndex, open, onClose, x, y, z, onUpdate }: TileGenerateModalProps) {
-  const [tiles, setTiles] = useState<string[][]>([]);
+  const [contextTiles5x5, setContextTiles5x5] = useState<string[][]>([]);
   const [prompt, setPrompt] = useState("");
   const [modelVariant, setModelVariant] = useState<ModelVariant>(DEFAULT_MODEL_VARIANT);
   const [loading, setLoading] = useState(false);
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [previewId, setPreviewId] = useState<string | null>(null);
   const [blendPreview, setBlendPreview] = useState<boolean>(true);
   const [offsetX, setOffsetX] = useState<number>(0);
   const [offsetY, setOffsetY] = useState<number>(0);
   const [driftPeak, setDriftPeak] = useState<number | null>(null);
   const [driftLoading, setDriftLoading] = useState<boolean>(false);
-  const [previewTiles, setPreviewTiles] = useState<string[][] | null>(null);
+  const [previewCenter3x3, setPreviewCenter3x3] = useState<string[][] | null>(null);
+  const [isPreviewLoading, setIsPreviewLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [loadingTiles, setLoadingTiles] = useState(true);
   const [newTilePositions, setNewTilePositions] = useState<Set<string>>(new Set());
   const [activeTab, setActiveTab] = useState<string>("preview");
   const [rateLimit, setRateLimit] = useState<RateLimitStatusResponse | null>(null);
   const [rateLimitError, setRateLimitError] = useState<string | null>(null);
+  const previewRequestSeqRef = useRef(0);
+  const previewAbortRef = useRef<AbortController | null>(null);
   // Nudge (drift correction) controls are optional and off by default
   const [nudgeOpen, setNudgeOpen] = useState<boolean>(false);
   const [nudgeApplied, setNudgeApplied] = useState<boolean>(false);
@@ -94,61 +120,79 @@ export function TileGenerateModal({ mapId, timelineIndex, open, onClose, x, y, z
     };
   }, [open]);
 
-  // Load the 3x3 grid of tiles with selective cache busting
+  // Load the 5x5 context grid with selective cache busting.
   useEffect(() => {
     if (!open) return;
-    
+
+    let cancelled = false;
     const loadTiles = async () => {
       setLoadingTiles(true);
-      const newTiles: string[][] = [];
-      const newPositions = new Set<string>();
-      
-      // First, fetch metadata for all tiles to get their status and timestamps
-      const metadataPromises: Promise<{x: number, y: number, status: string, updatedAt: string | null}>[] = [];
-      for (let dy = -1; dy <= 1; dy++) {
-        for (let dx = -1; dx <= 1; dx++) {
-          const tileX = x + dx;
-          const tileY = y + dy;
-          metadataPromises.push(
-            fetch(withMapTimeline(`/api/meta/${z}/${tileX}/${tileY}`))
-              .then(r => r.json())
-              .then(data => ({ x: tileX, y: tileY, ...data }))
-          );
-        }
-      }
-      
-      const metadata = await Promise.all(metadataPromises);
-      
-      // Create URLs with cache busting based on metadata
-      for (let dy = -1; dy <= 1; dy++) {
-        const row: string[] = [];
-        for (let dx = -1; dx <= 1; dx++) {
-          const tileX = x + dx;
-          const tileY = y + dy;
-          const tileMeta = metadata.find(m => m.x === tileX && m.y === tileY);
-          
-          // Check if this is a new/empty tile
-          if (tileMeta?.status === 'EMPTY') {
-            newPositions.add(`${tileX},${tileY}`);
+      try {
+        const contextTiles: string[][] = [];
+        const newPositions = new Set<string>();
+
+        // First, fetch metadata for all tiles to get their status and timestamps.
+        const metadataPromises: Promise<{ x: number; y: number; status?: string; updatedAt?: string | null }>[] = [];
+        for (let dy = -VIEW_RADIUS; dy <= VIEW_RADIUS; dy++) {
+          for (let dx = -VIEW_RADIUS; dx <= VIEW_RADIUS; dx++) {
+            const tileX = x + dx;
+            const tileY = y + dy;
+            metadataPromises.push(
+              fetch(withMapTimeline(`/api/meta/${z}/${tileX}/${tileY}`))
+                .then((response) => response.json())
+                .then((data) => ({ x: tileX, y: tileY, ...data })),
+            );
           }
-          
-          // Add cache buster based on updatedAt or current time for fresh load
-          const cacheBuster = tileMeta?.updatedAt 
-            ? new Date(tileMeta.updatedAt).getTime() 
-            : Date.now();
-          const url = withMapTimeline(`/api/tiles/${z}/${tileX}/${tileY}?v=${cacheBuster}`);
-          row.push(url);
         }
-        newTiles.push(row);
+
+        const metadataEntries = await Promise.all(metadataPromises);
+        if (cancelled) return;
+        const metadataByKey = new Map<string, { status?: string; updatedAt?: string | null }>();
+        for (const tileMeta of metadataEntries) {
+          metadataByKey.set(`${tileMeta.x},${tileMeta.y}`, tileMeta);
+        }
+
+        // Create tile URLs with cache busting based on metadata.
+        for (let dy = -VIEW_RADIUS; dy <= VIEW_RADIUS; dy++) {
+          const row: string[] = [];
+          for (let dx = -VIEW_RADIUS; dx <= VIEW_RADIUS; dx++) {
+            const tileX = x + dx;
+            const tileY = y + dy;
+            const tileMeta = metadataByKey.get(`${tileX},${tileY}`);
+
+            if (tileMeta?.status === "EMPTY") {
+              newPositions.add(`${tileX},${tileY}`);
+            }
+
+            const cacheBuster = tileMeta?.updatedAt ? new Date(tileMeta.updatedAt).getTime() : Date.now();
+            const url = withMapTimeline(`/api/tiles/${z}/${tileX}/${tileY}?v=${cacheBuster}`);
+            row.push(url);
+          }
+          contextTiles.push(row);
+        }
+
+        if (cancelled) return;
+        setContextTiles5x5(contextTiles);
+        setNewTilePositions(newPositions);
+      } finally {
+        if (!cancelled) {
+          setLoadingTiles(false);
+        }
       }
-      
-      setTiles(newTiles);
-      setNewTilePositions(newPositions);
-      setLoadingTiles(false);
     };
-    
-    loadTiles();
-  }, [mapId, open, timelineIndex, withMapTimeline, x, y, z]);
+
+    void loadTiles();
+    return () => {
+      cancelled = true;
+    };
+  }, [open, withMapTimeline, x, y, z]);
+
+  useEffect(() => {
+    return () => {
+      previewAbortRef.current?.abort();
+      previewAbortRef.current = null;
+    };
+  }, []);
 
   const toErrorMessage = (err: unknown, fallback: string): string => {
     if (err instanceof Error && err.message.trim()) {
@@ -186,9 +230,14 @@ export function TileGenerateModal({ mapId, timelineIndex, open, onClose, x, y, z
     return bodyText.trim() || fallback;
   };
 
-  // Extract 9 tiles from a composite image
-  const extractTilesFromComposite = async (compositeUrl: string): Promise<string[][]> => {
-    const response = await fetch(compositeUrl, { cache: "no-store" });
+  const isAbortError = (err: unknown): boolean => {
+    if (err instanceof DOMException) return err.name === "AbortError";
+    return err instanceof Error && err.name === "AbortError";
+  };
+
+  // Extract 3x3 tiles from a composite image.
+  const extractTilesFromComposite = async (compositeUrl: string, signal?: AbortSignal): Promise<string[][]> => {
+    const response = await fetch(compositeUrl, { cache: "no-store", signal });
     if (!response.ok) {
       const message = await readErrorMessageFromResponse(
         response,
@@ -222,13 +271,13 @@ export function TileGenerateModal({ mapId, timelineIndex, open, onClose, x, y, z
     }
 
     const extractedTiles: string[][] = [];
-    const expectedSize = TILE_SIZE * GRID_SIZE;
+    const expectedSize = TILE_SIZE * PREVIEW_SPAN;
     const scaleX = img.width / expectedSize;
     const scaleY = img.height / expectedSize;
 
-    for (let dy = 0; dy < GRID_SIZE; dy++) {
+    for (let dy = 0; dy < PREVIEW_SPAN; dy++) {
       const row: string[] = [];
-      for (let dx = 0; dx < GRID_SIZE; dx++) {
+      for (let dx = 0; dx < PREVIEW_SPAN; dx++) {
         const canvas = document.createElement("canvas");
         canvas.width = TILE_SIZE;
         canvas.height = TILE_SIZE;
@@ -272,10 +321,28 @@ export function TileGenerateModal({ mapId, timelineIndex, open, onClose, x, y, z
       params.set("tx", String(tx));
       params.set("ty", String(ty));
     }
+    previewAbortRef.current?.abort();
+    const controller = new AbortController();
+    previewAbortRef.current = controller;
+    const requestSeq = previewRequestSeqRef.current + 1;
+    previewRequestSeqRef.current = requestSeq;
+    setIsPreviewLoading(true);
+
     const url = `/api/preview/${id}?${params.toString()}`;
-    setPreviewUrl(url);
-    const extractedTiles = await extractTilesFromComposite(url);
-    setPreviewTiles(extractedTiles);
+    try {
+      const extractedTiles = await extractTilesFromComposite(url, controller.signal);
+      if (requestSeq !== previewRequestSeqRef.current) {
+        return;
+      }
+      setPreviewCenter3x3(extractedTiles);
+    } finally {
+      if (previewAbortRef.current === controller) {
+        previewAbortRef.current = null;
+      }
+      if (requestSeq === previewRequestSeqRef.current) {
+        setIsPreviewLoading(false);
+      }
+    }
   };
 
   const safeLoadPreviewTiles = async (id: string, blended: boolean, txOverride?: number, tyOverride?: number) => {
@@ -283,6 +350,9 @@ export function TileGenerateModal({ mapId, timelineIndex, open, onClose, x, y, z
       await loadPreviewTiles(id, blended, txOverride, tyOverride);
       setError(null);
     } catch (err) {
+      if (isAbortError(err)) {
+        return;
+      }
       setError(toErrorMessage(err, "Failed to load preview tiles"));
     }
   };
@@ -300,7 +370,7 @@ export function TileGenerateModal({ mapId, timelineIndex, open, onClose, x, y, z
       // Ensure we have raw generated tiles
       const rawUrl = withMapTimeline(`/api/preview/${id}`); // raw mode
       const rawTiles = await extractTilesFromComposite(rawUrl);
-      if (!tiles || !rawTiles) return;
+      if (!contextTiles5x5.length || !rawTiles) return;
 
       // Use all existing positions in the 3x3 neighborhood.
       const pairs: { ex: string; gen: string }[] = [];
@@ -311,8 +381,8 @@ export function TileGenerateModal({ mapId, timelineIndex, open, onClose, x, y, z
           const key = `${tileX},${tileY}`;
           const exists = !newTilePositions.has(key);
           if (!exists) continue;
-          const ex = tiles[dy + 1]?.[dx + 1];
-          const gen = rawTiles[dy + 1]?.[dx + 1];
+          const ex = contextTiles5x5[dy + VIEW_RADIUS]?.[dx + VIEW_RADIUS];
+          const gen = rawTiles[dy + PREVIEW_RADIUS]?.[dx + PREVIEW_RADIUS];
           if (ex && gen) {
             pairs.push({ ex, gen });
           }
@@ -387,7 +457,7 @@ export function TileGenerateModal({ mapId, timelineIndex, open, onClose, x, y, z
       const data = await response.json();
       setPreviewId(data.previewId);
       // Default to no drift correction until user opts-in
-      await loadPreviewTiles(data.previewId, blendPreview);
+      await safeLoadPreviewTiles(data.previewId, blendPreview);
     } catch (err) {
       setError(toErrorMessage(err, "An error occurred"));
     } finally {
@@ -458,7 +528,7 @@ export function TileGenerateModal({ mapId, timelineIndex, open, onClose, x, y, z
       const data = await response.json();
       setPreviewId(data.previewId);
       // Default to no drift correction until user opts-in
-      await loadPreviewTiles(data.previewId, blendPreview);
+      await safeLoadPreviewTiles(data.previewId, blendPreview);
     } catch (err) {
       setError(toErrorMessage(err, "An error occurred"));
     } finally {
@@ -467,12 +537,15 @@ export function TileGenerateModal({ mapId, timelineIndex, open, onClose, x, y, z
   };
 
   const handleReset = () => {
+    previewAbortRef.current?.abort();
+    previewAbortRef.current = null;
+    previewRequestSeqRef.current += 1;
     setPrompt("");
     setModelVariant(DEFAULT_MODEL_VARIANT);
     setBlendPreview(true);
-    setPreviewUrl(null);
     setPreviewId(null);
-    setPreviewTiles(null);
+    setPreviewCenter3x3(null);
+    setIsPreviewLoading(false);
     setError(null);
     setRateLimitError(null);
     setOffsetX(0);
@@ -486,6 +559,11 @@ export function TileGenerateModal({ mapId, timelineIndex, open, onClose, x, y, z
     handleReset();
     onClose();
   };
+
+  const previewGrid5x5 = useMemo(
+    () => composePreviewGrid5x5(contextTiles5x5, previewCenter3x3),
+    [contextTiles5x5, previewCenter3x3],
+  );
 
   return (
     <Dialog.Root open={open} onOpenChange={(next) => { if (!next) handleClose(); }}>
@@ -503,7 +581,7 @@ export function TileGenerateModal({ mapId, timelineIndex, open, onClose, x, y, z
                 <div>
                   <Dialog.Title className="text-lg">Generate Preview</Dialog.Title>
                   <Dialog.Description className="text-xs">
-                    Provide a prompt, review the 3x3 preview, then approve changes.
+                    Provide a prompt, review the 5x5 context (center 3x3 preview), then approve changes.
                   </Dialog.Description>
                 </div>
                 <button
@@ -567,7 +645,7 @@ export function TileGenerateModal({ mapId, timelineIndex, open, onClose, x, y, z
                     <button
                       type="button"
                       aria-label="Generate"
-                      onClick={() => (previewTiles ? handleRetry() : handleEdit())}
+                      onClick={() => (previewCenter3x3 ? handleRetry() : handleEdit())}
                       disabled={loading || !prompt.trim() || activeModelExhausted}
                       className="h-7 w-7 rounded-full inline-flex items-center justify-center bg-blue-600 text-white hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed focus:outline-auto"
                       title={
@@ -677,11 +755,11 @@ export function TileGenerateModal({ mapId, timelineIndex, open, onClose, x, y, z
                             <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600" />
                           </div>
                         ) : (
-                          <div className="absolute inset-0 grid grid-cols-3 grid-rows-3 gap-0">
-                            {tiles.map((row, dy) =>
+                          <div className="absolute inset-0 grid grid-cols-5 grid-rows-5 gap-0">
+                            {contextTiles5x5.map((row, dy) =>
                               row.map((tile, dx) => (
                                 <div key={`${dx}-${dy}`} className="relative w-full h-full">
-                                  <img src={tile} alt={`Tile ${x + dx - 1},${y + dy - 1}`} className="block w-full h-full object-cover" />
+                                  <img src={tile} alt={`Tile ${x + dx - VIEW_RADIUS},${y + dy - VIEW_RADIUS}`} className="block w-full h-full object-cover" />
                                 </div>
                               ))
                             )}
@@ -695,35 +773,48 @@ export function TileGenerateModal({ mapId, timelineIndex, open, onClose, x, y, z
                   <Tabs.Content value="preview">
                     <div className="rounded-2xl border bg-gray-100 p-2 flex items-center justify-center mt-2">
                       <div className="relative overflow-hidden rounded-xl group mx-auto w-full aspect-square" style={{ width: 'min(100%, 56vmin)' }}>
-                        <div className="absolute inset-0 grid grid-cols-3 grid-rows-3 gap-0">
-                          {(previewTiles || tiles).map((row, dy) =>
-                            row.map((tileData, dx) => {
-                              const tileX = x + dx - 1;
-                              const tileY = y + dy - 1;
-                              const tileExists = !newTilePositions.has(`${tileX},${tileY}`);
-                              const imgSrc = previewTiles ? tileData : tiles[dy][dx];
+                        {loadingTiles ? (
+                          <div className="absolute inset-0 grid place-items-center">
+                            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600" />
+                          </div>
+                        ) : (
+                          <div className="absolute inset-0 grid grid-cols-5 grid-rows-5 gap-0">
+                            {previewGrid5x5.map((row, dy) =>
+                              row.map((tileData, dx) => {
+                                const tileX = x + dx - VIEW_RADIUS;
+                                const tileY = y + dy - VIEW_RADIUS;
+                                const tileExists = !newTilePositions.has(`${tileX},${tileY}`);
 
-                              return (
-                                <div key={`${dx}-${dy}`} className="relative w-full h-full">
-                                  <img src={imgSrc} alt={`Tile ${tileX},${tileY}`} className="block w-full h-full object-cover" />
-                                  {/* Hover-only tile source tag for blended preview */}
-                                  {previewTiles && blendPreview && (
-                                    <div className="pointer-events-none absolute inset-0 opacity-0 group-hover:opacity-100 group-hover:pointer-events-auto transition-opacity duration-150">
-                                      <div className="flex items-start justify-between p-1">
-                                        <span
-                                          className="px-1.5 py-0.5 rounded-md text-[10px] font-medium text-white shadow"
-                                          style={{ backgroundColor: tileExists ? '#3b82f6' : '#10b981' }}
-                                        >
-                                          {tileExists ? 'EXISTING' : 'NEW'}
-                                        </span>
+                                return (
+                                  <div key={`${dx}-${dy}`} className="relative w-full h-full">
+                                    <img src={tileData} alt={`Tile ${tileX},${tileY}`} className="block w-full h-full object-cover" />
+                                    {/* Hover-only tile source tag for blended preview */}
+                                    {previewCenter3x3 && blendPreview && (
+                                      <div className="pointer-events-none absolute inset-0 opacity-0 group-hover:opacity-100 group-hover:pointer-events-auto transition-opacity duration-150">
+                                        <div className="flex items-start justify-between p-1">
+                                          <span
+                                            className="px-1.5 py-0.5 rounded-md text-[10px] font-medium text-white shadow"
+                                            style={{ backgroundColor: tileExists ? '#3b82f6' : '#10b981' }}
+                                          >
+                                            {tileExists ? 'EXISTING' : 'NEW'}
+                                          </span>
+                                        </div>
                                       </div>
-                                    </div>
-                                  )}
-                                </div>
-                              );
-                            })
-                          )}
-                        </div>
+                                    )}
+                                  </div>
+                                );
+                              })
+                            )}
+                          </div>
+                        )}
+                        {isPreviewLoading && (
+                          <div className="pointer-events-none absolute inset-0 flex items-start justify-end p-2">
+                            <span className="inline-flex items-center gap-1 rounded-full bg-white/90 px-2 py-1 text-[10px] text-gray-700 shadow">
+                              <span className="h-2.5 w-2.5 animate-spin rounded-full border border-gray-400 border-t-transparent" />
+                              Updating...
+                            </span>
+                          </div>
+                        )}
                       </div>
                     </div>
                     {/* Compact summary moved to footer toolbar */}
@@ -776,7 +867,8 @@ export function TileGenerateModal({ mapId, timelineIndex, open, onClose, x, y, z
                         </Tooltip.Trigger>
                         <Tooltip.Portal>
                           <Tooltip.Content sideOffset={6} className="z-[10002] bg-gray-900 text-white px-2 py-1 rounded text-xs">
-                            Preview mode: {blendPreview ? 'Blended applies fixed 3x3 seam result' : 'Raw model output (applies full 3x3 directly)'}
+                            Preview mode: {blendPreview ? 'Blended applies fixed 3x3 seam result' : 'Raw model output (applies full 3x3 directly)'}.
+                            5x5 outer ring is background reference only and is not written.
                             <Tooltip.Arrow className="fill-gray-900" />
                           </Tooltip.Content>
                         </Tooltip.Portal>
@@ -855,7 +947,7 @@ export function TileGenerateModal({ mapId, timelineIndex, open, onClose, x, y, z
 
                     <button
                       onClick={handleAccept}
-                      disabled={loading || !previewTiles}
+                      disabled={loading || !previewCenter3x3}
                       className="h-8 px-3 rounded-md text-xs bg-green-600 text-white hover:bg-green-700 disabled:bg-gray-300 disabled:cursor-not-allowed inline-flex items-center gap-1.5"
                     >
                       <Check className="w-4 h-4" />
@@ -864,7 +956,7 @@ export function TileGenerateModal({ mapId, timelineIndex, open, onClose, x, y, z
                   </div>
                 </div>
                 {/* Nudge expandable row */}
-                {blendPreview && nudgeOpen && previewTiles && (
+                {blendPreview && nudgeOpen && previewCenter3x3 && (
                   <div className="mt-2 flex items-center gap-2 text-xs">
                     <span className="text-gray-700">Drift correction</span>
                     <div className="flex items-center gap-1">

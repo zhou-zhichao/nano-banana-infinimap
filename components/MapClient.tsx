@@ -8,7 +8,7 @@ import TimelineBar from "./TimelineBar";
 import BatchGenerateModal, { type BatchGenerateOptions } from "./BatchGenerateModal";
 import BatchStatusPanel from "./BatchStatusPanel";
 import { startBatchRun, type BatchRunHandle } from "@/lib/batch/executor";
-import type { BatchRunState, TileBounds } from "@/lib/batch/types";
+import type { BatchRunState, TileBounds, TileCoord } from "@/lib/batch/types";
 
 const TileControls = dynamic(() => import("./TileControls"), { ssr: false });
 const MAX_Z = Number(process.env.NEXT_PUBLIC_ZMAX ?? 8);
@@ -52,6 +52,18 @@ function parseInitialView() {
     lng: hasCenter ? parsedLng : null,
     hasZoomParam: params.has("z"),
   };
+}
+
+function leafKey(x: number, y: number) {
+  return `${x},${y}`;
+}
+
+function parseLeafKey(key: string): TileCoord | null {
+  const [xRaw, yRaw] = key.split(",");
+  const x = Number(xRaw);
+  const y = Number(yRaw);
+  if (!Number.isInteger(x) || !Number.isInteger(y)) return null;
+  return { x, y };
 }
 
 export default function MapClient({ mapId, mapWidth, mapHeight }: Props) {
@@ -192,6 +204,40 @@ export default function MapClient({ mapId, mapWidth, mapHeight }: Props) {
     [mapId],
   );
 
+  const refreshRenderedTilesForLeafCoords = useCallback(
+    (leafTiles: TileCoord[], timelineIndex = activeTimelineRef.current) => {
+      const mapInstance = mapRef.current;
+      const tileLayer: any = tileLayerRef.current;
+      if (!mapInstance || !tileLayer || leafTiles.length === 0) return;
+
+      const currentZoom = Math.max(0, Math.min(MAX_Z, Math.round(mapInstance.getZoom())));
+      const divisor = 2 ** Math.max(0, MAX_Z - currentZoom);
+      const targetTileKeys = new Set<string>();
+      for (const tile of leafTiles) {
+        const tx = Math.floor(tile.x / divisor);
+        const ty = Math.floor(tile.y / divisor);
+        targetTileKeys.add(`${currentZoom}:${tx}:${ty}`);
+      }
+      if (targetTileKeys.size === 0) return;
+
+      const ts = Date.now();
+      const nextTemplateUrl = withMapTimeline(`/api/tiles/{z}/{x}/{y}?v=${ts}`, mapId, timelineIndex);
+      tileLayer?.setUrl?.(nextTemplateUrl, true);
+
+      const loadedTiles: Array<{ coords?: { x: number; y: number; z: number }; el?: HTMLImageElement }> = Object.values(
+        tileLayer?._tiles ?? {},
+      ) as Array<{ coords?: { x: number; y: number; z: number }; el?: HTMLImageElement }>;
+      for (const loaded of loadedTiles) {
+        const coords = loaded.coords;
+        const el = loaded.el;
+        if (!coords || !el) continue;
+        if (!targetTileKeys.has(`${coords.z}:${coords.x}:${coords.y}`)) continue;
+        el.src = withMapTimeline(`/api/tiles/${coords.z}/${coords.x}/${coords.y}?v=${ts}`, mapId, timelineIndex);
+      }
+    },
+    [mapId],
+  );
+
   const fitMapToLeafBounds = useCallback((tileBounds: TileBounds | null) => {
     if (!tileBounds || !mapRef.current) return;
     const mapInstance = mapRef.current;
@@ -219,7 +265,8 @@ export default function MapClient({ mapId, mapWidth, mapHeight }: Props) {
 
       batchHandleRef.current?.cancel();
       const runTimeline = activeTimelineRef.current;
-      let observedWaveCount = -1;
+      let observedWaveCount = 0;
+      const touchedLeafKeys = new Set<string>();
 
       const handle = startBatchRun({
         mapId,
@@ -235,9 +282,33 @@ export default function MapClient({ mapId, mapWidth, mapHeight }: Props) {
         modelVariant: options.modelVariant,
         onState: (nextState) => {
           setBatchState(nextState);
-          if (nextState.waves.length !== observedWaveCount) {
+          if (nextState.waves.length > observedWaveCount) {
+            const updatedLeafKeys = new Set<string>();
+            for (let i = observedWaveCount; i < nextState.waves.length; i++) {
+              const wave = nextState.waves[i];
+              for (const anchorId of wave.successIds) {
+                const anchor = nextState.anchors[anchorId];
+                if (!anchor) continue;
+                for (let dy = -1; dy <= 1; dy++) {
+                  for (let dx = -1; dx <= 1; dx++) {
+                    const tileX = anchor.x + dx;
+                    const tileY = anchor.y + dy;
+                    if (!isMaxZoomTileInBounds(tileX, tileY)) continue;
+                    const key = leafKey(tileX, tileY);
+                    updatedLeafKeys.add(key);
+                    touchedLeafKeys.add(key);
+                  }
+                }
+              }
+            }
             observedWaveCount = nextState.waves.length;
-            void refreshVisibleTiles(runTimeline);
+
+            if (updatedLeafKeys.size > 0) {
+              const updatedLeaves = Array.from(updatedLeafKeys)
+                .map(parseLeafKey)
+                .filter((tile): tile is TileCoord => tile !== null);
+              refreshRenderedTilesForLeafCoords(updatedLeaves, runTimeline);
+            }
           }
         },
       });
@@ -251,7 +322,14 @@ export default function MapClient({ mapId, mapWidth, mapHeight }: Props) {
       void handle.done
         .then((finalState) => {
           setBatchState(finalState);
-          void refreshVisibleTiles(runTimeline);
+          const touchedLeaves = Array.from(touchedLeafKeys)
+            .map(parseLeafKey)
+            .filter((tile): tile is TileCoord => tile !== null);
+          if (touchedLeaves.length > 0) {
+            refreshRenderedTilesForLeafCoords(touchedLeaves, runTimeline);
+          } else {
+            void refreshVisibleTiles(runTimeline);
+          }
         })
         .finally(() => {
           if (batchHandleRef.current === handle) {
@@ -259,7 +337,7 @@ export default function MapClient({ mapId, mapWidth, mapHeight }: Props) {
           }
         });
     },
-    [batchOrigin, fitMapToLeafBounds, mapHeight, mapId, mapWidth, refreshVisibleTiles],
+    [batchOrigin, fitMapToLeafBounds, isMaxZoomTileInBounds, mapHeight, mapId, mapWidth, refreshRenderedTilesForLeafCoords, refreshVisibleTiles],
   );
 
   const pollTileStatus = useCallback(
@@ -278,15 +356,14 @@ export default function MapClient({ mapId, mapWidth, mapHeight }: Props) {
         const data = await response.json().catch(() => null);
         if (data?.status === "READY") {
           if (sessionId !== mapSessionRef.current || !mapRef.current) return;
-          const tileLayer = tileLayerRef.current;
-          tileLayer?.setUrl?.(withMapTimeline(`/api/tiles/{z}/{x}/{y}?v=${Date.now()}`, mapId, timelineIndex));
+          refreshRenderedTilesForLeafCoords([{ x, y }], timelineIndex);
           setTileExists((prev) => ({ ...prev, [timelineKey(timelineIndex, x, y)]: true }));
           return;
         }
         attempts += 1;
       }
     },
-    [mapId, timelineKey],
+    [mapId, refreshRenderedTilesForLeafCoords, timelineKey],
   );
 
   const handleGenerate = useCallback(
@@ -333,9 +410,9 @@ export default function MapClient({ mapId, mapWidth, mapHeight }: Props) {
         throw new Error("Failed to delete tile");
       }
       setTileExists((prev) => ({ ...prev, [timelineKey(timelineIndex, x, y)]: false }));
-      await refreshVisibleTiles(timelineIndex);
+      refreshRenderedTilesForLeafCoords([{ x, y }], timelineIndex);
     },
-    [mapId, refreshVisibleTiles, timelineKey],
+    [mapId, refreshRenderedTilesForLeafCoords, timelineKey],
   );
 
   const reloadTimeline = useCallback(

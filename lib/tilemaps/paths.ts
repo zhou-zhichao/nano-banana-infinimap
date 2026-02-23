@@ -65,6 +65,10 @@ export function mapTilePath(mapId: string, z: number, x: number, y: number) {
   return path.join(mapTilesDir(mapId), `${z}_${x}_${y}.webp`);
 }
 
+export function presetMoonTilePath(z: number, x: number, y: number) {
+  return path.join(TILEMAPS_PRESET_MOON_TILES_DIR, `${z}_${x}_${y}.webp`);
+}
+
 export function mapMetaPath(mapId: string, z: number, x: number, y: number) {
   return path.join(mapMetaDir(mapId), `${z}_${x}_${y}.json`);
 }

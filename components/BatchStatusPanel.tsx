@@ -112,7 +112,7 @@ export default function BatchStatusPanel({ state, onCancel }: BatchStatusPanelPr
         <div className="rounded-md border border-gray-200 bg-gray-50 px-2 py-1.5">
           <div className="text-[11px] font-medium text-gray-700 mb-0.5">Parents</div>
           <div className="text-[11px] text-gray-600 leading-5">
-            enqueued waves {state.parents.enqueuedWaves} | completed waves {state.parents.completedWaves} | level{" "}
+            enqueued batches {state.parents.enqueuedWaves} | completed batches {state.parents.completedWaves} | level{" "}
             {state.parents.currentLevelZ == null ? "-" : state.parents.currentLevelZ}
           </div>
         </div>

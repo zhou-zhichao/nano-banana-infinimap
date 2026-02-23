@@ -43,6 +43,14 @@ export async function readTilemapManifest(mapId: string): Promise<TilemapManifes
     const parsed = JSON.parse(raw) as TilemapManifest;
     if (!isValidMapId(parsed.id)) return null;
     if (!parsed.name || !parsed.template) return null;
+    if (parsed.template !== "blank" && parsed.template !== "moon") return null;
+    if (
+      parsed.baseStorage !== undefined &&
+      parsed.baseStorage !== "copied" &&
+      parsed.baseStorage !== "preset_overlay"
+    ) {
+      return null;
+    }
     if (!Number.isInteger(parsed.width) || parsed.width < 1) return null;
     if (!Number.isInteger(parsed.height) || parsed.height < 1) return null;
     return parsed;
@@ -99,11 +107,6 @@ function normalizeBlankSize(width?: number, height?: number) {
   return { width: width!, height: height! };
 }
 
-async function copyMoonPresetToMap(mapId: string) {
-  await fs.mkdir(mapTilesDir(mapId), { recursive: true });
-  await fs.cp(TILEMAPS_PRESET_MOON_TILES_DIR, mapTilesDir(mapId), { recursive: true });
-}
-
 export async function createTilemap(input: CreateTilemapInput): Promise<TilemapManifest> {
   await ensureTilemapRootDirs();
   const name = input.name.trim();
@@ -125,6 +128,7 @@ export async function createTilemap(input: CreateTilemapInput): Promise<TilemapM
     id: mapId,
     name,
     template,
+    baseStorage: template === "moon" ? "preset_overlay" : undefined,
     width: width!,
     height: height!,
     createdAt: now,
@@ -133,10 +137,6 @@ export async function createTilemap(input: CreateTilemapInput): Promise<TilemapM
 
   await ensureTilemapDirs(mapId);
   await writeTilemapManifest(manifest);
-
-  if (template === "moon") {
-    await copyMoonPresetToMap(mapId);
-  }
 
   return manifest;
 }

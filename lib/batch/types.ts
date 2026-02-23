@@ -57,6 +57,7 @@ export type ParentRefreshJob = {
   waveIndex: number;
   childZ: number;
   leafTiles: TileCoord[];
+  maxLevels?: number;
   status: ParentRefreshJobStatus;
   attempts: number;
   enqueuedAt: number;

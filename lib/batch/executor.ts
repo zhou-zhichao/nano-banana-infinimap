@@ -39,6 +39,10 @@ export type StartBatchRunInput = {
   maxGenerateRetries?: number;
   parentJobRetries?: number;
   parentWorkerConcurrency?: number;
+  parentDebounceMs?: number;
+  parentWaveBatchSize?: number;
+  parentLeafBatchSize?: number;
+  parentCascadeDepth?: number;
   fetchImpl?: FetchLike;
   signal?: AbortSignal;
   onState?: (state: BatchRunState) => void;
@@ -249,6 +253,10 @@ export function startBatchRun(input: StartBatchRunInput): BatchRunHandle {
   const maxGenerateRetries = clampInt(input.maxGenerateRetries ?? 3, 0, 10);
   const parentJobRetries = clampInt(input.parentJobRetries ?? 2, 0, 10);
   const parentWorkerConcurrency = clampInt(input.parentWorkerConcurrency ?? 1, 1, 4);
+  const parentDebounceMs = clampInt(input.parentDebounceMs ?? 1000, 0, 60_000);
+  const parentWaveBatchSize = clampInt(input.parentWaveBatchSize ?? 3, 1, 64);
+  const parentLeafBatchSize = clampInt(input.parentLeafBatchSize ?? 256, 1, 10_000);
+  const parentCascadeDepth = clampInt(input.parentCascadeDepth ?? 2, 0, z);
 
   const fetchImpl = input.fetchImpl ?? fetch;
   const abortController = new AbortController();
@@ -299,6 +307,12 @@ export function startBatchRun(input: StartBatchRunInput): BatchRunHandle {
   let generationFinished = false;
   let fatalError: Error | null = null;
   const onState = input.onState;
+  const dirtyParentLeaves = new Set<string>();
+  const allTouchedParentLeaves = new Set<string>();
+  let dirtyParentMarkedAt: number | null = null;
+  let dirtyParentWaveCount = 0;
+  let dirtyParentLastWaveIndex = 0;
+  let finalCatchupEnqueued = parentCascadeDepth >= z;
 
   const emit = () => {
     state.generate = computeGenerateProgress(state.anchors, state.waves.length);
@@ -431,7 +445,19 @@ export function startBatchRun(input: StartBatchRunInput): BatchRunHandle {
     };
   };
 
-  const enqueueParentRefreshJob = (waveIndex: number, successIds: string[]) => {
+  const toTileCoords = (keys: Set<string>) => {
+    const coords: TileCoord[] = [];
+    for (const key of keys) {
+      const [xRaw, yRaw] = key.split(",");
+      const x = Number(xRaw);
+      const y = Number(yRaw);
+      if (!Number.isInteger(x) || !Number.isInteger(y)) continue;
+      coords.push({ x, y });
+    }
+    return dedupeTileCoords(coords);
+  };
+
+  const markDirtyParentLeaves = (waveIndex: number, successIds: string[]) => {
     if (successIds.length === 0) return;
     const leaves: TileCoord[] = [];
     for (const id of successIds) {
@@ -442,6 +468,45 @@ export function startBatchRun(input: StartBatchRunInput): BatchRunHandle {
     const dedupedLeaves = dedupeTileCoords(leaves);
     if (dedupedLeaves.length === 0) return;
 
+    const dirtyWasEmpty = dirtyParentLeaves.size === 0;
+    for (const leaf of dedupedLeaves) {
+      const key = `${leaf.x},${leaf.y}`;
+      allTouchedParentLeaves.add(key);
+      if (parentCascadeDepth > 0) {
+        dirtyParentLeaves.add(key);
+      }
+    }
+    if (dirtyParentLeaves.size === 0) {
+      dirtyParentLastWaveIndex = waveIndex;
+      return;
+    }
+    if (dirtyWasEmpty) {
+      dirtyParentMarkedAt = Date.now();
+      dirtyParentWaveCount = 0;
+    }
+    dirtyParentWaveCount += 1;
+    dirtyParentLastWaveIndex = waveIndex;
+  };
+
+  const shouldFlushDirtyParents = () => {
+    if (dirtyParentLeaves.size === 0 || dirtyParentMarkedAt == null) return false;
+    if (generationFinished) return true;
+    if (dirtyParentWaveCount >= parentWaveBatchSize) return true;
+    if (dirtyParentLeaves.size >= parentLeafBatchSize) return true;
+    return Date.now() - dirtyParentMarkedAt >= parentDebounceMs;
+  };
+
+  const flushDirtyParentsToJob = () => {
+    if (!shouldFlushDirtyParents()) return null;
+    const dedupedLeaves = toTileCoords(dirtyParentLeaves);
+    if (dedupedLeaves.length === 0) {
+      dirtyParentLeaves.clear();
+      dirtyParentMarkedAt = null;
+      dirtyParentWaveCount = 0;
+      return null;
+    }
+
+    const waveIndex = dirtyParentLastWaveIndex;
     const job: ParentRefreshJob = {
       id: `parents-${waveIndex}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       waveIndex,
@@ -450,9 +515,40 @@ export function startBatchRun(input: StartBatchRunInput): BatchRunHandle {
       status: "QUEUED",
       attempts: 0,
       enqueuedAt: Date.now(),
+      maxLevels: parentCascadeDepth,
+    };
+    dirtyParentLeaves.clear();
+    dirtyParentMarkedAt = null;
+    dirtyParentWaveCount = 0;
+    state.parentJobs.push(job);
+    emit();
+    return job;
+  };
+
+  const enqueueFinalCatchupJob = () => {
+    if (!generationFinished) return null;
+    if (finalCatchupEnqueued) return null;
+    const hasRunningOrQueued = state.parentJobs.some((job) => job.status === "RUNNING" || job.status === "QUEUED");
+    if (hasRunningOrQueued) return null;
+
+    finalCatchupEnqueued = true;
+    const dedupedLeaves = toTileCoords(allTouchedParentLeaves);
+    allTouchedParentLeaves.clear();
+    if (dedupedLeaves.length === 0) return null;
+
+    const job: ParentRefreshJob = {
+      id: `parents-final-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      waveIndex: state.currentWave,
+      childZ: z,
+      leafTiles: dedupedLeaves,
+      status: "QUEUED",
+      attempts: 0,
+      enqueuedAt: Date.now(),
+      maxLevels: z,
     };
     state.parentJobs.push(job);
     emit();
+    return job;
   };
 
   const refreshParentLevelOverApi = async (
@@ -483,8 +579,9 @@ export function startBatchRun(input: StartBatchRunInput): BatchRunHandle {
   const runParentJob = async (job: ParentRefreshJob) => {
     let childZ = job.childZ;
     let childTiles = [...job.leafTiles];
+    let levelsRemaining = clampInt(job.maxLevels ?? parentCascadeDepth, 0, childZ);
 
-    while (childZ > 0 && childTiles.length > 0) {
+    while (childZ > 0 && childTiles.length > 0 && levelsRemaining > 0) {
       ensureNotAborted(signal);
       job.currentLevelZ = childZ - 1;
       emit();
@@ -494,6 +591,7 @@ export function startBatchRun(input: StartBatchRunInput): BatchRunHandle {
         : await refreshParentLevelOverApi(childZ, childTiles);
       childTiles = dedupeTileCoords(result.parentTiles);
       childZ -= 1;
+      levelsRemaining -= 1;
     }
     job.currentLevelZ = undefined;
   };
@@ -502,10 +600,18 @@ export function startBatchRun(input: StartBatchRunInput): BatchRunHandle {
     while (true) {
       if (fatalError) return;
       ensureNotAborted(signal);
-      const queuedJob = state.parentJobs.find((job) => job.status === "QUEUED");
+      let queuedJob = state.parentJobs.find((job) => job.status === "QUEUED");
+      if (!queuedJob) {
+        flushDirtyParentsToJob();
+        queuedJob = state.parentJobs.find((job) => job.status === "QUEUED");
+      }
+      if (!queuedJob) {
+        enqueueFinalCatchupJob();
+        queuedJob = state.parentJobs.find((job) => job.status === "QUEUED");
+      }
       if (!queuedJob) {
         const hasRunningOrQueued = state.parentJobs.some((job) => job.status === "RUNNING" || job.status === "QUEUED");
-        if (generationFinished && !hasRunningOrQueued) {
+        if (generationFinished && dirtyParentLeaves.size === 0 && !hasRunningOrQueued && finalCatchupEnqueued) {
           return;
         }
         await sleep(120, signal);
@@ -659,7 +765,7 @@ export function startBatchRun(input: StartBatchRunInput): BatchRunHandle {
           finishedAt: waveFinishedAt,
         });
         emit();
-        enqueueParentRefreshJob(waveIndex, successIds);
+        markDirtyParentLeaves(waveIndex, successIds);
       }
 
       generationFinished = true;

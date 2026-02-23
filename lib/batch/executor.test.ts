@@ -54,6 +54,8 @@ test("wave N+1 can start while wave N parent refresh is still running", async ()
   const handle = startBatchRun(
     createBaseInput({
       maxParallel: 1,
+      parentDebounceMs: 0,
+      parentWaveBatchSize: 1,
       executeAnchor: async () => {
         await delay(20);
       },
@@ -67,9 +69,54 @@ test("wave N+1 can start while wave N parent refresh is still running", async ()
   assert.equal(finalState.status, "COMPLETED");
   assert.ok(finalState.waves.length >= 2, "need at least two waves");
 
-  const firstJob = finalState.parentJobs.find((job) => job.waveIndex === 1);
-  assert.ok(firstJob?.finishedAt, "wave 1 parent job should finish");
+  const firstJob = finalState.parentJobs[0];
+  assert.ok(firstJob?.finishedAt, "first parent job should finish");
   assert.ok(finalState.waves[1].startedAt < (firstJob?.finishedAt ?? 0));
+});
+
+test("debounced parent refresh batches multiple waves into fewer jobs", async () => {
+  const handle = startBatchRun(
+    createBaseInput({
+      maxParallel: 1,
+      parentDebounceMs: 60_000,
+      parentWaveBatchSize: 64,
+      parentLeafBatchSize: 10_000,
+      executeAnchor: async () => {
+        await delay(1);
+      },
+      refreshParentLevel: async () => ({ parentTiles: [] as TileCoord[] }),
+    }),
+  );
+  const finalState = await handle.done;
+  assert.equal(finalState.status, "COMPLETED");
+  assert.ok(finalState.waves.length > 1, "need multiple waves to validate batching");
+  assert.ok(finalState.parentJobs.length < finalState.waves.length);
+});
+
+test("parent cascade depth defers deeper levels to final catch-up", async () => {
+  const observedChildZ: number[] = [];
+  const handle = startBatchRun(
+    createBaseInput({
+      z: 6,
+      layers: 1,
+      maxParallel: 1,
+      parentDebounceMs: 0,
+      parentWaveBatchSize: 1,
+      parentCascadeDepth: 1,
+      executeAnchor: async () => {
+        await delay(1);
+      },
+      refreshParentLevel: async (_job, request) => {
+        observedChildZ.push(request.childZ);
+        return { parentTiles: [{ x: 0, y: 0 }] as TileCoord[] };
+      },
+    }),
+  );
+  const finalState = await handle.done;
+  assert.equal(finalState.status, "COMPLETED");
+  assert.ok(observedChildZ.length > 0);
+  assert.equal(observedChildZ.includes(6), true);
+  assert.equal(observedChildZ.some((childZ) => childZ < 6), true);
 });
 
 test("batch completion waits for parent queue drain after generation is done", async () => {

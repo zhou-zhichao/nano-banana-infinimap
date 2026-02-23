@@ -12,7 +12,7 @@ import type { BatchRunState, TileBounds } from "@/lib/batch/types";
 
 const TileControls = dynamic(() => import("./TileControls"), { ssr: false });
 const MAX_Z = Number(process.env.NEXT_PUBLIC_ZMAX ?? 8);
-const DEFAULT_INITIAL_ZOOM = 2;
+const DEFAULT_INITIAL_ZOOM = 3;
 
 type Props = {
   mapId: string;
@@ -35,22 +35,29 @@ function parsePositiveInt(input: string | null, fallback: number) {
   return parsed;
 }
 
+function parseFiniteNumberParam(params: URLSearchParams, key: string) {
+  const raw = params.get(key);
+  if (raw == null || raw.trim() === "") return null;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) return null;
+  return parsed;
+}
+
 function parseInitialView() {
   const params = new URLSearchParams(window.location.search);
-  const parsedZoom = Number(params.get("z"));
-  const zoom = Number.isFinite(parsedZoom)
-    ? Math.max(0, Math.min(MAX_Z, Math.round(parsedZoom)))
-    : DEFAULT_INITIAL_ZOOM;
+  const parsedZoom = parseFiniteNumberParam(params, "z");
+  const zoom =
+    parsedZoom == null ? DEFAULT_INITIAL_ZOOM : Math.max(0, Math.min(MAX_Z, Math.round(parsedZoom)));
 
-  const parsedLat = Number(params.get("lat"));
-  const parsedLng = Number(params.get("lng"));
-  const hasCenter = Number.isFinite(parsedLat) && Number.isFinite(parsedLng);
+  const parsedLat = parseFiniteNumberParam(params, "lat");
+  const parsedLng = parseFiniteNumberParam(params, "lng");
+  const hasCenter = parsedLat != null && parsedLng != null;
 
   return {
     zoom,
     lat: hasCenter ? parsedLat : null,
     lng: hasCenter ? parsedLng : null,
-    hasZoomParam: params.has("z"),
+    hasZoomParam: parsedZoom != null,
   };
 }
 
@@ -483,8 +490,11 @@ export default function MapClient({ mapId, mapWidth, mapHeight }: Props) {
       const bounds = new L.LatLngBounds(southWest, northEast);
       mapInstance.setMaxBounds(bounds);
 
-      if (initialView.lat != null && initialView.lng != null) mapInstance.setView([initialView.lat, initialView.lng], initialView.zoom);
-      else mapInstance.fitBounds(bounds);
+      if (initialView.lat != null && initialView.lng != null) {
+        mapInstance.setView([initialView.lat, initialView.lng], initialView.zoom);
+      } else {
+        mapInstance.setView(bounds.getCenter(), initialView.zoom);
+      }
 
       const url = withMapTimeline(`/api/tiles/{z}/{x}/{y}?v=${Date.now()}`, mapId, activeTimelineRef.current);
       const tileLayer = L.tileLayer(url, {

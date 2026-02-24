@@ -64,7 +64,7 @@ _api_key_round_robin_cursor = 0
 
 
 class GenerateGridRequest(BaseModel):
-    prompt: str = Field(min_length=1, max_length=2000)
+    prompt: str = Field(min_length=1, max_length=20000)
     style_name: str = Field(min_length=1, max_length=200, default="default-style")
     grid_png_base64: str = Field(min_length=1)
     negative_prompt: str = Field(default="", max_length=1000)

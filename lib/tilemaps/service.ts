@@ -6,7 +6,6 @@ import {
   mapLocksDir,
   mapManifestPath,
   mapMetaDir,
-  mapQueueDir,
   mapRootDir,
   mapTilesDir,
   TILEMAPS_MAPS_DIR,
@@ -33,7 +32,6 @@ export async function ensureTilemapDirs(mapId: string) {
   await fs.mkdir(mapTilesDir(mapId), { recursive: true });
   await fs.mkdir(mapMetaDir(mapId), { recursive: true });
   await fs.mkdir(mapLocksDir(mapId), { recursive: true });
-  await fs.mkdir(mapQueueDir(mapId), { recursive: true });
 }
 
 export async function readTilemapManifest(mapId: string): Promise<TilemapManifest | null> {

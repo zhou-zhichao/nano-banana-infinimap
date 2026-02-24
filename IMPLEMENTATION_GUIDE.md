@@ -1,10 +1,10 @@
-<!-- note: I start every project off with an implementation guide that i build with chatgpt. 
+﻿<!-- note: I start every project off with an implementation guide that i build with chatgpt. 
 not all of this is reflective of the current state of the app but i leave it here for historicity-->
 
 Below is a revised, copy-pasteable guide for a **Next.js + Tailwind** app that:
 
 * Serves a **generative, neighbor-aware slippy map**.
-* Uses a **single default image for all empty tiles** until they’re generated.
+* Uses a **single default image for all empty tiles** until they鈥檙e generated.
 * Lets users click at **max zoom** to **generate** a tile via a **prompt** and a **server-side style reference/config**.
 * **Combines neighbors** (if present) during generation for edge continuity.
 * Stores **everything on the filesystem** with simple **adapters** so you can plug in a cloud DB later.
@@ -14,17 +14,16 @@ Below is a revised, copy-pasteable guide for a **Next.js + Tailwind** app that:
 
 # 1) Tech stack (local-only)
 
-* **Next.js 14+ (App Router)** — UI & API.
-* **Leaflet** — tile viewer.
-* **Tailwind CSS** — styling.
-* **Sharp** — image processing.
-* **No external services** — filesystem storage:
+* **Next.js 14+ (App Router)** 鈥?UI & API.
+* **Leaflet** 鈥?tile viewer.
+* **Tailwind CSS** 鈥?styling.
+* **Sharp** 鈥?image processing.
+* **No external services** 鈥?filesystem storage:
 
   * `FileDB` adapter: JSON files for tile metadata.
-  * `FileQueue` adapter: in-process queue with file-based locks.
   * Tile images in `.tiles/`.
 
-> Later, you can add `CloudDB` / `CloudQueue` adapters with the same interface.
+> Later, you can add cloud-backed DB/storage adapters with the same interface.
 
 ---
 
@@ -78,8 +77,6 @@ imaginary-map/
     map/page.tsx
     api/
       tiles/[z]/[x]/[y]/route.ts     // GET tile (serves .webp or default)
-      claim/[z]/[x]/[y]/route.ts     // POST request to generate @ ZMAX
-      invalidate/[z]/[x]/[y]/route.ts// POST invalidate a tile
       meta/[z]/[x]/[y]/route.ts      // GET metadata for cache-busting
   components/
     MapClient.tsx
@@ -87,8 +84,6 @@ imaginary-map/
     adapters/
       db.ts                           // DB interface
       db.file.ts                      // FileDB implementation
-      queue.ts                        // Queue interface
-      queue.file.ts                   // FileQueue implementation
       lock.file.ts                    // File-based advisory locks
     coords.ts                         // tile/world math
     hashing.ts                        // hashes + Merkle bubbling using DB
@@ -133,7 +128,7 @@ export const LOCK_DIR = path.join(ROOT, ".locks");          // lock files
 export const QUEUE_DIR = path.join(ROOT, ".queue");         // queue state
 ```
 
-Create dirs at boot if missing (we’ll do that in adapters).
+Create dirs at boot if missing (we鈥檒l do that in adapters).
 
 ---
 
@@ -293,53 +288,6 @@ export async function withFileLock<T>(name:string, fn:()=>Promise<T>): Promise<T
   finally { await fs.rm(p).catch(() => {}); }
 }
 ```
-
----
-
-# 9) In-process queue (file-backed idempotency)
-
-`lib/adapters/queue.ts` (interface)
-
-```ts
-export interface Queue {
-  enqueue(name:string, payload:any): Promise<void>;
-}
-```
-
-`lib/adapters/queue.file.ts`
-
-```ts
-import fs from "node:fs/promises";
-import path from "node:path";
-import { QUEUE_DIR } from "../paths";
-import { Queue } from "./queue";
-import { withFileLock } from "./lock.file";
-import { generateTile } from "../generator";
-import { bubbleHashes } from "../hashing";
-
-await fs.mkdir(QUEUE_DIR, { recursive: true }).catch(() => {});
-const RUNNING = new Set<string>();
-
-export const fileQueue: Queue = {
-  async enqueue(name, payload) {
-    // serialize per-tile; run job right away (in-process)
-    const key = `${payload.z}/${payload.x}/${payload.y}`;
-    if (RUNNING.has(key)) return; // ignore duplicate bursts
-    RUNNING.add(key);
-    try {
-      await withFileLock(`job_${key}`, async () => {
-        const res = await generateTile(payload.z, payload.x, payload.y, payload.prompt);
-        await bubbleHashes(payload.z, payload.x, payload.y);
-        return res;
-      });
-    } finally {
-      RUNNING.delete(key);
-    }
-  }
-};
-```
-
-> This queue executes jobs immediately in the same Next.js server process—great for local use. The lock avoids duplicate concurrent generation.
 
 ---
 
@@ -549,7 +497,7 @@ export async function generateTile(z:number,x:number,y:number, prompt:string) {
 }
 ```
 
-> Swap `runModelStub()` with your real generator: pass `neighbors[]`, `styleCfg/ref` (available in `loadStyleControl()`), and `prompt`. Ensure a **256×256 WebP** buffer is returned.
+> Swap `runModelStub()` with your real generator: pass `neighbors[]`, `styleCfg/ref` (available in `loadStyleControl()`), and `prompt`. Ensure a **256脳256 WebP** buffer is returned.
 
 ---
 
@@ -585,54 +533,7 @@ export async function GET(_req: NextRequest, { params }:{params:{z:string,x:stri
 }
 ```
 
-## 14.2 POST claim (enqueue local job)
-
-`app/api/claim/[z]/[x]/[y]/route.ts`
-
-```ts
-import { NextRequest, NextResponse } from "next/server";
-import { ZMAX } from "@/lib/coords";
-import { z as zod } from "zod";
-import { db } from "@/lib/adapters/db.file";
-import { fileQueue } from "@/lib/adapters/queue.file";
-
-const Body = zod.object({ prompt: zod.string().max(500).default("") });
-
-export async function POST(req: NextRequest, { params }:{params:{z:string,x:string,y:string}}) {
-  const z = Number(params.z), x = Number(params.x), y = Number(params.y);
-  if (z !== ZMAX) return NextResponse.json({ error:"Only max zoom can be claimed" }, { status:400 });
-
-  const { prompt } = Body.parse(await req.json().catch(()=>({})));
-
-  await db.upsertTile({ z,x,y, status:"PENDING" });        // idempotent mark
-  fileQueue.enqueue(`gen-${z}-${x}-${y}`, { z,x,y,prompt }); // in-process
-
-  return NextResponse.json({ ok:true, status:"ENQUEUED" });
-}
-```
-
-## 14.3 POST invalidate (regenerate)
-
-`app/api/invalidate/[z]/[x]/[y]/route.ts`
-
-```ts
-import { NextRequest, NextResponse } from "next/server";
-import { db } from "@/lib/adapters/db.file";
-import { fileQueue } from "@/lib/adapters/queue.file";
-
-export async function POST(_req: NextRequest, { params }:{params:{z:string,x:string,y:string}}) {
-  const z = Number(params.z), x = Number(params.x), y = Number(params.y);
-  const t = await db.getTile(z,x,y);
-  if (!t) return NextResponse.json({ error:"Tile not found" }, { status:404 });
-
-  await db.updateTile(z,x,y, { status:"PENDING", contentVer:(t.contentVer??0)+1 });
-  await fileQueue.enqueue(`regen-${z}-${x}-${y}`, { z,x,y,prompt:"regenerate" });
-
-  return NextResponse.json({ ok:true });
-}
-```
-
-## 14.4 GET meta
+## 14.2 GET meta
 
 `app/api/meta/[z]/[x]/[y]/route.ts`
 
@@ -668,7 +569,6 @@ const MAX_Z = Number(process.env.NEXT_PUBLIC_ZMAX ?? 8);
 export default function MapClient() {
   const ref = useRef<HTMLDivElement>(null);
   const [map, setMap] = useState<L.Map|null>(null);
-  const [prompt, setPrompt] = useState("");
 
   useEffect(() => {
     if (!ref.current || map) return;
@@ -683,32 +583,11 @@ export default function MapClient() {
     L.tileLayer(`/api/tiles/{z}/{x}/{y}.webp`, { tileSize:256, minZoom:0, maxZoom:MAX_Z, noWrap:true })
       .addTo(m);
 
-    m.on("click", async (e) => {
-      if (m.getZoom() !== m.getMaxZoom()) return;
-      const p = m.project(e.latlng, m.getZoom());
-      const x = Math.floor(p.x / 256), y = Math.floor(p.y / 256);
-      await fetch(`/api/claim/${MAX_Z}/${x}/${y}`, {
-        method:"POST",
-        headers:{ "Content-Type":"application/json" },
-        body: JSON.stringify({ prompt })
-      });
-      // optional: small toast that tile was enqueued
-    });
-
     setMap(m);
   }, [map]);
 
   return (
     <div className="w-full h-full flex flex-col">
-      <div className="p-3 z-10 absolute top-2 left-2 bg-white/90 rounded-xl shadow flex gap-2 items-center">
-        <input
-          value={prompt}
-          onChange={e => setPrompt(e.target.value)}
-          placeholder="Describe this area…"
-          className="border rounded px-3 py-2 w-80"
-        />
-        <span className="text-sm text-gray-500">Zoom to max, click to generate</span>
-      </div>
       <div ref={ref} className="w-full h-full" />
     </div>
   );
@@ -738,10 +617,10 @@ async function ClientBoundary() {
 # 16) Behavior recap (with your requirements)
 
 * **Blank by default**: all tiles (any zoom) serve **`public/default-tile.webp`** until generated.
-* **Generate “empty” tiles at max zoom**: user clicks at max zoom; a job is **enqueued locally**; when done, the tile image is written to `.tiles/` and metadata to `.meta/`.
-* **Neighbor-aware**: generator reads any existing neighbor images and incorporates them (stub shows where—replace with your model code).
+* **Generate tiles at max zoom**: client calls edit/confirm APIs to preview and commit neighborhood-aware updates.
+* **Neighbor-aware**: generator reads any existing neighbor images and incorporates them (stub shows where鈥攔eplace with your model code).
 * **Style control**: server reads `public/style-control/config.json` (+ optional `ref.png`) each generation call; change the file to affect style globally without redeploy.
-* **Parent refresh**: we compute parent **hashes** based on children; clients can rely on ETag (already set). If you want hard cache-busting in the URL, you can later extend Leaflet’s URL template to include `?v=` from `/api/meta`.
+* **Parent refresh**: we compute parent **hashes** based on children; clients can rely on ETag (already set). If you want hard cache-busting in the URL, you can later extend Leaflet鈥檚 URL template to include `?v=` from `/api/meta`.
 
 ---
 
@@ -749,7 +628,7 @@ async function ClientBoundary() {
 
 * **Mosaic parents**: add the resize-of-4-children approach (same as in the previous guide) to generate nicer parent tiles on demand. If any child is missing, fall back to default.
 * **Status polling / tiny HUD**: poll `/api/meta` for the tile you just requested; if status flips to READY, call `tileLayer.redraw()` to fetch a fresh tile.
-* **Metatiling 2×2**: in your real generator, render 512×512 then crop to 256 to remove seams.
+* **Metatiling 2脳2**: in your real generator, render 512脳512 then crop to 256 to remove seams.
 
 ---
 
@@ -772,5 +651,5 @@ async function ClientBoundary() {
 # 19) What to swap when going cloud later
 
 * **DB**: Implement `CloudDB` with the same `DB` interface (getTile, upsertTile, updateTile, getTiles). Replace imports of `db` with the new adapter.
-* **Queue**: Implement `CloudQueue` (e.g., BullMQ) with the same `Queue` interface (enqueue). The rest of the app doesn’t change.
 * **Storage**: Switch `.tiles` to object storage (S3/GCS) by replacing `readTileFile`/`writeTileFile`.
+

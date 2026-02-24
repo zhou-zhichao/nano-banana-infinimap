@@ -10,7 +10,7 @@ import { parseTimelineIndexFromRequest, resolveTimelineContext } from "@/lib/tim
 import { PythonImageServiceError } from "@/lib/pythonImageService";
 
 const requestSchema = z.object({
-  prompt: z.string().min(1),
+  prompt: z.string().min(1).max(20000),
   modelVariant: z.enum(MODEL_VARIANTS).optional(),
 });
 

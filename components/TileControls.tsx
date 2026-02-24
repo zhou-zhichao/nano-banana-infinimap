@@ -11,8 +11,6 @@ interface TileControlsProps {
   y: number;
   z: number;
   exists: boolean;
-  onGenerate: (prompt: string) => Promise<void>;
-  onRegenerate: (prompt: string) => Promise<void>;
   onDelete: () => Promise<void>;
   onRefreshTiles?: () => void;
   onBatchGenerate?: () => void;
@@ -25,8 +23,6 @@ export default function TileControls({
   y,
   z,
   exists,
-  onGenerate,
-  onRegenerate,
   onDelete,
   onRefreshTiles,
   onBatchGenerate,

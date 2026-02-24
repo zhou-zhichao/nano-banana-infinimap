@@ -1,20 +1,13 @@
 import sharp from "sharp";
 import { TILE, ZMAX } from "./coords";
-import { writeTileFile, readTileFile } from "./storage";
-import { db } from "./adapters/db.file";
-import { blake2sHex, hashTilePayload } from "./hashing";
+import { readTileFile } from "./storage";
+import { blake2sHex } from "./hashing";
 import { loadStyleControl } from "./style";
 import { generateGridImage } from "./pythonImageService";
 import { DEFAULT_MODEL_VARIANT, ModelVariant } from "./modelVariant";
 import { resolveVertexModelForVariant } from "./serverModelResolver";
-import { shouldGenerateRealtimeParentTiles } from "./parentGenerationPolicy";
 import { resolveTimelineContextByNodeId } from "./timeline/context";
-import {
-  markTimelineTilePending,
-  readTimelineNodeMeta,
-  resolveEffectiveTileBuffer,
-  writeTimelineTileReady,
-} from "./timeline/storage";
+import { resolveEffectiveTileBuffer } from "./timeline/storage";
 import { TimelineContext } from "./timeline/types";
 
 type NeighborDir = "N" | "S" | "E" | "W" | "NE" | "NW" | "SE" | "SW";
@@ -357,120 +350,3 @@ export async function generateGridPreview(
   }
 }
 
-export async function generateTile(
-  mapId: string,
-  z: number,
-  x: number,
-  y: number,
-  prompt: string,
-  options?: GenerationOptions,
-) {
-  console.log(`\ngenerateTile called for z:${z} x:${x} y:${y}`);
-  console.log(`  User prompt: "${prompt}"`);
-
-  if (z !== ZMAX) throw new Error("Generation only at max zoom");
-
-  const timelineContext = await resolveGenerationTimelineContext(mapId, options?.timelineNodeId);
-  if (options?.timelineNodeId && !timelineContext) {
-    throw new Error(`Timeline node not found: ${options.timelineNodeId}`);
-  }
-
-  const baselineRecord = timelineContext ? null : await db.upsertTile(mapId, { z, x, y, status: "PENDING" });
-  if (timelineContext) {
-    await markTimelineTilePending(mapId, timelineContext.node.id, z, x, y);
-  }
-  console.log("  Tile marked as PENDING");
-
-  const { name: styleName } = await loadStyleControl();
-  const modelVariant = options?.modelVariant ?? DEFAULT_MODEL_VARIANT;
-  const requestedModel = resolveVertexModelForVariant(modelVariant);
-  const seedHex = blake2sHex(Buffer.from(`${z}:${x}:${y}:${styleName}:${prompt}:${modelVariant}`)).slice(0, 8);
-
-  const [neighbors, centerBuf] = await Promise.all([
-    getNeighbors(mapId, z, x, y, timelineContext),
-    readEffectiveTileBuffer(mapId, z, x, y, timelineContext),
-  ]);
-  const buf = await runModel({ prompt, styleName, neighbors, centerBuf, seedHex, modelVariant, requestedModel });
-  const bytesHash = blake2sHex(buf).slice(0, 16);
-
-  if (timelineContext) {
-    const current = await readTimelineNodeMeta(mapId, timelineContext.node.id, z, x, y);
-    const contentVer = (current?.contentVer ?? 0) + 1;
-    const hash = hashTilePayload({
-      algorithmVersion: 1,
-      contentVer,
-      bytesHash,
-      seed: seedHex,
-    });
-
-    await writeTimelineTileReady(mapId, timelineContext.node.id, z, x, y, buf, { hash, seed: seedHex });
-    console.log(`  Timeline tile marked as READY with hash: ${hash}`);
-
-    generateParentTilesForChild(mapId, z, x, y, timelineContext).catch((error) => {
-      console.error(`Failed to generate timeline parent tiles: ${error}`);
-    });
-    console.log(`  Tile generation complete for z:${z} x:${x} y:${y}\n`);
-    return { hash, contentVer };
-  }
-
-  const contentVer = (baselineRecord?.contentVer ?? 0) + 1;
-  const hash = hashTilePayload({
-    algorithmVersion: 1,
-    contentVer,
-    bytesHash,
-    seed: seedHex,
-  });
-
-  await writeTileFile(mapId, z, x, y, buf);
-  console.log("  Tile file written to disk");
-
-  const updated = await db.updateTile(mapId, z, x, y, {
-    status: "READY",
-    hash,
-    contentVer,
-    seed: seedHex,
-  });
-  console.log(`  Tile marked as READY with hash: ${updated.hash}`);
-
-  generateParentTilesForChild(mapId, z, x, y, null).catch((error) => {
-    console.error(`Failed to generate parent tiles: ${error}`);
-  });
-  console.log(`  Tile generation complete for z:${z} x:${x} y:${y}\n`);
-
-  return { hash: updated.hash!, contentVer: updated.contentVer! };
-}
-
-async function generateParentTilesForChild(
-  mapId: string,
-  z: number,
-  x: number,
-  y: number,
-  timelineContext: TimelineContext | null,
-) {
-  if (!shouldGenerateRealtimeParentTiles(mapId, "generation")) {
-    console.log(`  Skipping realtime parent generation for map:${mapId} (using preset parent levels)`);
-    return;
-  }
-
-  const { generateParentTile, generateParentTileAtNode } = await import("./parentTiles");
-  const { parentOf } = await import("./coords");
-
-  console.log(`  Generating parent tiles for z:${z} x:${x} y:${y}`);
-
-  let currentZ = z;
-  let currentX = x;
-  let currentY = y;
-
-  while (currentZ > 0) {
-    const parent = parentOf(currentZ, currentX, currentY);
-    if (timelineContext) {
-      await generateParentTileAtNode(timelineContext, parent.z, parent.x, parent.y);
-    } else {
-      await generateParentTile(mapId, parent.z, parent.x, parent.y);
-    }
-
-    currentZ = parent.z;
-    currentX = parent.x;
-    currentY = parent.y;
-  }
-}

@@ -598,68 +598,6 @@ export default function MapClient({ mapId, mapWidth, mapHeight }: Props) {
     ],
   );
 
-  const pollTileStatus = useCallback(
-    async (x: number, y: number, sessionId: number, timelineIndex: number) => {
-      let attempts = 0;
-      const maxAttempts = 30;
-      while (attempts < maxAttempts) {
-        if (sessionId !== mapSessionRef.current || !mapRef.current) return;
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-        if (sessionId !== mapSessionRef.current || !mapRef.current) return;
-        const response = await fetch(withMapTimeline(`/api/meta/${MAX_Z}/${x}/${y}`, mapId, timelineIndex)).catch(() => null);
-        if (!response) {
-          attempts += 1;
-          continue;
-        }
-        const data = await response.json().catch(() => null);
-        if (data?.status === "READY") {
-          if (sessionId !== mapSessionRef.current || !mapRef.current) return;
-          refreshRenderedTilesForLeafCoords([{ x, y }], timelineIndex);
-          setTileExists((prev) => ({ ...prev, [timelineKey(timelineIndex, x, y)]: true }));
-          return;
-        }
-        attempts += 1;
-      }
-    },
-    [mapId, refreshRenderedTilesForLeafCoords, timelineKey],
-  );
-
-  const handleGenerate = useCallback(
-    async (x: number, y: number, prompt: string) => {
-      const timelineIndex = activeTimelineRef.current;
-      const response = await fetch(withMapTimeline(`/api/claim/${MAX_Z}/${x}/${y}`, mapId, timelineIndex), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt }),
-      });
-      if (!response.ok) {
-        throw new Error("Failed to generate tile");
-      }
-      if (mapRef.current) {
-        void pollTileStatus(x, y, mapSessionRef.current, timelineIndex);
-      }
-    },
-    [mapId, pollTileStatus],
-  );
-
-  const handleRegenerate = useCallback(
-    async (x: number, y: number, prompt: string) => {
-      const timelineIndex = activeTimelineRef.current;
-      const response = await fetch(withMapTimeline(`/api/invalidate/${MAX_Z}/${x}/${y}`, mapId, timelineIndex), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt }),
-      });
-      if (!response.ok) {
-        throw new Error("Failed to regenerate tile");
-      }
-      if (mapRef.current) {
-        void pollTileStatus(x, y, mapSessionRef.current, timelineIndex);
-      }
-    },
-    [mapId, pollTileStatus],
-  );
-
   const handleDelete = useCallback(
     async (x: number, y: number) => {
       const timelineIndex = activeTimelineRef.current;
@@ -986,8 +924,6 @@ export default function MapClient({ mapId, mapWidth, mapHeight }: Props) {
               y={selectedTile.y}
               z={MAX_Z}
               exists={tileExists[timelineKey(activeTimelineIndex, selectedTile.x, selectedTile.y)] || false}
-              onGenerate={(prompt) => handleGenerate(selectedTile.x, selectedTile.y, prompt)}
-              onRegenerate={(prompt) => handleRegenerate(selectedTile.x, selectedTile.y, prompt)}
               onDelete={() => handleDelete(selectedTile.x, selectedTile.y)}
               onBatchGenerate={() => {
                 setBatchOrigin({ x: selectedTile.x, y: selectedTile.y });

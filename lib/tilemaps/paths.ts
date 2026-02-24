@@ -25,10 +25,6 @@ export function mapLocksDir(mapId: string) {
   return path.join(mapRootDir(mapId), "locks");
 }
 
-export function mapQueueDir(mapId: string) {
-  return path.join(mapRootDir(mapId), "queue");
-}
-
 export function mapTimelineDir(mapId: string) {
   return path.join(mapRootDir(mapId), "timeline");
 }

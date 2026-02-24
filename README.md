@@ -142,12 +142,11 @@ Data layout:
 - `.tilemaps/maps/<mapId>/timeline/nodes/<nodeId>/tiles/` -> timeline overlay tile files
 - `.tilemaps/maps/<mapId>/timeline/nodes/<nodeId>/meta/` -> timeline overlay metadata
 - `.tilemaps/maps/<mapId>/locks/` -> lock files
-- `.tilemaps/maps/<mapId>/queue/` -> queue files
 
 On bootstrap, the app ensures v1 tilemap directories, then creates `default` only if it does not exist by copying `.tilemaps/presets/moon/tiles`.
 Existing `default` data is not overwritten on later startups.
 
-All timeline-aware APIs (`/api/timeline`, `/api/meta/:z/:x/:y`, `/api/tiles/:z/:x/:y`, `/api/claim`, `/api/invalidate`, `/api/edit-tile`, `/api/confirm-edit`) resolve state using both `mapId` and `t`.
+All timeline-aware APIs (`/api/timeline`, `/api/meta/:z/:x/:y`, `/api/tiles/:z/:x/:y`, `/api/edit-tile`, `/api/confirm-edit`) resolve state using both `mapId` and `t`.
 
 ## Precompute Parent Tiles (Manual)
 
@@ -168,9 +167,8 @@ corepack yarn regen:parents [mapId|preset:moon]
 
 Realtime parent policy:
 
-- Non-`default` maps: realtime parent regeneration runs for generation and direct tile updates.
-- `default` map: generation APIs (`claim`/`invalidate`) skip realtime parent regeneration to keep preset parent levels.
-- `default` map direct tile updates (`confirm-edit` and `delete`) still regenerate parent levels in realtime.
+- Realtime parent regeneration for direct tile updates runs on `confirm-edit` and `delete`.
+- Batch generation uses deferred parent refresh waves via `/api/parents/refresh-region`.
 
 ## Public Internet Access + Password
 

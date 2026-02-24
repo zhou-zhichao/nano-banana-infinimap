@@ -6,6 +6,11 @@ import type { BatchRunState } from "@/lib/batch/types";
 type BatchStatusPanelProps = {
   state: BatchRunState | null;
   onCancel?: () => void;
+  review?: {
+    enabled: boolean;
+    active: number;
+    queued: number;
+  };
 };
 
 function overlapsHorizontally(
@@ -17,7 +22,7 @@ function overlapsHorizontally(
   return leftA < rightB && rightA > leftB;
 }
 
-export default function BatchStatusPanel({ state, onCancel }: BatchStatusPanelProps) {
+export default function BatchStatusPanel({ state, onCancel, review }: BatchStatusPanelProps) {
   const panelRef = useRef<HTMLDivElement | null>(null);
   const [bottom, setBottom] = useState(12);
 
@@ -116,6 +121,15 @@ export default function BatchStatusPanel({ state, onCancel }: BatchStatusPanelPr
             {state.parents.currentLevelZ == null ? "-" : state.parents.currentLevelZ}
           </div>
         </div>
+
+        {review && (
+          <div className="rounded-md border border-gray-200 bg-gray-50 px-2 py-1.5 mt-2">
+            <div className="text-[11px] font-medium text-gray-700 mb-0.5">Review</div>
+            <div className="text-[11px] text-gray-600 leading-5">
+              enabled {review.enabled ? "yes" : "no"} | active {review.active} | queued {review.queued}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

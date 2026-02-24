@@ -14,6 +14,7 @@ export type BatchGenerateOptions = {
   modelVariant: ModelVariant;
   layers: number;
   maxParallel: number;
+  requireReview: boolean;
 };
 
 type BatchGenerateModalProps = {
@@ -27,6 +28,7 @@ type BatchGenerateModalProps = {
 
 const DEFAULT_LAYERS = 2;
 const DEFAULT_MAX_PARALLEL = 4;
+const DEFAULT_REQUIRE_REVIEW = true;
 
 export default function BatchGenerateModal({
   open,
@@ -40,6 +42,7 @@ export default function BatchGenerateModal({
   const [modelVariant, setModelVariant] = useState<ModelVariant>(DEFAULT_MODEL_VARIANT);
   const [layers, setLayers] = useState(DEFAULT_LAYERS);
   const [maxParallel, setMaxParallel] = useState(DEFAULT_MAX_PARALLEL);
+  const [requireReview, setRequireReview] = useState(DEFAULT_REQUIRE_REVIEW);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -48,6 +51,7 @@ export default function BatchGenerateModal({
     setModelVariant(DEFAULT_MODEL_VARIANT);
     setLayers(DEFAULT_LAYERS);
     setMaxParallel(DEFAULT_MAX_PARALLEL);
+    setRequireReview(DEFAULT_REQUIRE_REVIEW);
     setError(null);
   }, [open]);
 
@@ -66,6 +70,7 @@ export default function BatchGenerateModal({
       modelVariant,
       layers: nextLayers,
       maxParallel: nextParallel,
+      requireReview,
     });
   };
 
@@ -150,6 +155,17 @@ export default function BatchGenerateModal({
                 />
               </label>
             </div>
+
+            <label className="flex items-center gap-2 text-xs text-gray-700">
+              <input
+                type="checkbox"
+                checked={requireReview}
+                disabled={running}
+                onChange={(event) => setRequireReview(event.target.checked)}
+                className="h-4 w-4 accent-amber-600"
+              />
+              Human Review (Accept/Reject before apply)
+            </label>
 
             {error && <div className="rounded-md border border-red-200 bg-red-50 px-2 py-1 text-xs text-red-700">{error}</div>}
           </div>

@@ -4,6 +4,7 @@ const { spawnSync } = require("node:child_process");
 const tests = [
   "lib/batch/plan.test.ts",
   "lib/batch/executor.test.ts",
+  "lib/batch/reviewQueue.test.ts",
 ];
 
 const tsNodeBin = path.join(

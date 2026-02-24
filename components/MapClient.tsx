@@ -7,8 +7,11 @@ import { useSearchParams as useSearchParamsHook } from "next/navigation";
 import TimelineBar from "./TimelineBar";
 import BatchGenerateModal, { type BatchGenerateOptions } from "./BatchGenerateModal";
 import BatchStatusPanel from "./BatchStatusPanel";
-import { startBatchRun, type BatchRunHandle } from "@/lib/batch/executor";
+import BatchReviewModal, { type BatchReviewModalItem } from "./BatchReviewModal";
+import { startBatchRun, type BatchRunHandle, type StartBatchRunInput } from "@/lib/batch/executor";
 import type { BatchRunState, TileBounds, TileCoord } from "@/lib/batch/types";
+import type { ModelVariant } from "@/lib/modelVariant";
+import { ReviewQueue, type ReviewDecision, type ReviewQueueState } from "@/lib/batch/reviewQueue";
 
 const TileControls = dynamic(() => import("./TileControls"), { ssr: false });
 const MAX_Z = Number(process.env.NEXT_PUBLIC_ZMAX ?? 8);
@@ -22,6 +25,10 @@ type Props = {
 
 type TilePoint = { x: number; y: number; screenX: number; screenY: number };
 type TimelineNodeItem = { index: number; id: string; createdAt: string };
+type BatchReviewQueueItem = BatchReviewModalItem & {
+  attempt: number;
+  prompt: string;
+};
 
 function withMapTimeline(path: string, mapId: string, timelineIndex: number) {
   const separator = path.includes("?") ? "&" : "?";
@@ -73,6 +80,46 @@ function parseLeafKey(key: string): TileCoord | null {
   return { x, y };
 }
 
+function createAbortError(message = "Batch run aborted") {
+  const error = new Error(message);
+  error.name = "AbortError";
+  return error;
+}
+
+async function readErrorMessageFromResponse(response: Response, fallback: string) {
+  const text = await response.text().catch(() => "");
+  if (!text.trim()) return fallback;
+  try {
+    const parsed = JSON.parse(text) as { error?: unknown; detail?: unknown };
+    if (typeof parsed.error === "string" && parsed.error.trim()) return parsed.error.trim();
+    if (typeof parsed.detail === "string" && parsed.detail.trim()) return parsed.detail.trim();
+  } catch {
+    // fallback to raw response text
+  }
+  return text.trim() || fallback;
+}
+
+async function waitForDecisionWithAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) throw createAbortError();
+  return await new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      signal.removeEventListener("abort", onAbort);
+      reject(createAbortError());
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
 export default function MapClient({ mapId, mapWidth, mapHeight }: Props) {
   const mapElementRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<any>(null);
@@ -100,6 +147,14 @@ export default function MapClient({ mapId, mapWidth, mapHeight }: Props) {
   const [batchOrigin, setBatchOrigin] = useState<{ x: number; y: number } | null>(null);
   const [batchState, setBatchState] = useState<BatchRunState | null>(null);
   const batchHandleRef = useRef<BatchRunHandle | null>(null);
+  const batchRunTokenRef = useRef<string | null>(null);
+  const [reviewEnabled, setReviewEnabled] = useState(false);
+  const [reviewActiveItem, setReviewActiveItem] = useState<BatchReviewQueueItem | null>(null);
+  const [reviewPendingItems, setReviewPendingItems] = useState<BatchReviewQueueItem[]>([]);
+  const [reviewBusy, setReviewBusy] = useState(false);
+  const reviewQueueRef = useRef<ReviewQueue<BatchReviewQueueItem> | null>(null);
+  const cleanupPreviewIdsRef = useRef<Set<string>>(new Set());
+  const runTimelineRef = useRef<number | null>(null);
 
   const timelineKey = useCallback((timelineIndex: number, x: number, y: number) => `${timelineIndex}:${x},${y}`, []);
 
@@ -123,6 +178,10 @@ export default function MapClient({ mapId, mapWidth, mapHeight }: Props) {
     return () => {
       batchHandleRef.current?.cancel();
       batchHandleRef.current = null;
+      batchRunTokenRef.current = null;
+      reviewQueueRef.current?.cancelAll("Batch review cancelled");
+      reviewQueueRef.current = null;
+      cleanupPreviewIdsRef.current.clear();
     };
   }, []);
 
@@ -259,9 +318,65 @@ export default function MapClient({ mapId, mapWidth, mapHeight }: Props) {
     );
   }, []);
 
-  const cancelBatchRun = useCallback(() => {
-    batchHandleRef.current?.cancel();
+  const syncReviewQueueState = useCallback((queueState: ReviewQueueState<BatchReviewQueueItem>) => {
+    setReviewActiveItem(queueState.active?.payload ?? null);
+    setReviewPendingItems(queueState.pending.map((item) => item.payload));
   }, []);
+
+  const clearReviewUiState = useCallback(() => {
+    setReviewActiveItem(null);
+    setReviewPendingItems([]);
+    setReviewBusy(false);
+  }, []);
+
+  const deletePreviewById = useCallback(
+    async (previewId: string, timelineIndex: number, signal?: AbortSignal) => {
+      const response = await fetch(withMapTimeline(`/api/preview/${previewId}`, mapId, timelineIndex), {
+        method: "DELETE",
+        signal,
+      }).catch(() => null);
+      if (!response) return;
+      if (!response.ok && response.status !== 404) {
+        const message = await readErrorMessageFromResponse(response, "Failed to delete preview");
+        console.warn(`Failed to delete preview ${previewId}: ${message}`);
+      }
+    },
+    [mapId],
+  );
+
+  const cleanupPreviewIds = useCallback(
+    async (previewIds: Set<string>, timelineIndex: number) => {
+      const ids = Array.from(previewIds);
+      previewIds.clear();
+      if (ids.length === 0) return;
+      await Promise.allSettled(ids.map((previewId) => deletePreviewById(previewId, timelineIndex)));
+    },
+    [deletePreviewById],
+  );
+
+  const cancelBatchRun = useCallback(() => {
+    reviewQueueRef.current?.cancelAll("Batch review cancelled");
+    batchHandleRef.current?.cancel();
+    batchRunTokenRef.current = null;
+    const timelineIndex = runTimelineRef.current;
+    if (timelineIndex != null && cleanupPreviewIdsRef.current.size > 0) {
+      const pending = new Set(cleanupPreviewIdsRef.current);
+      cleanupPreviewIdsRef.current.clear();
+      void cleanupPreviewIds(pending, timelineIndex);
+    }
+  }, [cleanupPreviewIds]);
+
+  const resolveReviewDecision = useCallback(
+    async (decision: ReviewDecision) => {
+      if (reviewBusy) return;
+      const queue = reviewQueueRef.current;
+      if (!queue) return;
+      setReviewBusy(true);
+      queue.resolveActive(decision);
+      setReviewBusy(false);
+    },
+    [reviewBusy],
+  );
 
   const startBatchGenerate = useCallback(
     async (options: BatchGenerateOptions) => {
@@ -270,10 +385,115 @@ export default function MapClient({ mapId, mapWidth, mapHeight }: Props) {
         throw new Error("No anchor tile selected");
       }
 
+      reviewQueueRef.current?.cancelAll("Batch review cancelled");
       batchHandleRef.current?.cancel();
+      batchRunTokenRef.current = null;
+      clearReviewUiState();
       const runTimeline = activeTimelineRef.current;
+      const runToken = `run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      batchRunTokenRef.current = runToken;
+      runTimelineRef.current = runTimeline;
       let observedWaveCount = 0;
       const touchedLeafKeys = new Set<string>();
+      const runCleanupPreviewIds = new Set<string>();
+      cleanupPreviewIdsRef.current = runCleanupPreviewIds;
+      setReviewEnabled(options.requireReview);
+
+      const reviewQueue = options.requireReview
+        ? new ReviewQueue<BatchReviewQueueItem>({
+            onChange: (queueState) => {
+              if (reviewQueueRef.current !== reviewQueue) return;
+              syncReviewQueueState(queueState);
+            },
+          })
+        : null;
+
+      reviewQueueRef.current = reviewQueue;
+      if (!reviewQueue) {
+        clearReviewUiState();
+      }
+
+      const executeAnchor: StartBatchRunInput["executeAnchor"] =
+        reviewQueue != null
+          ? async (anchor, ctx) => {
+              let nextVariant: ModelVariant = options.modelVariant;
+              while (true) {
+                if (ctx.signal.aborted) throw createAbortError();
+
+                const editResponse = await fetch(
+                  withMapTimeline(`/api/edit-tile/${MAX_Z}/${anchor.x}/${anchor.y}`, mapId, runTimeline),
+                  {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ prompt: options.prompt, modelVariant: nextVariant }),
+                    signal: ctx.signal,
+                  },
+                );
+                if (!editResponse.ok) {
+                  const message = await readErrorMessageFromResponse(editResponse, "Failed to edit tile");
+                  throw new Error(message);
+                }
+                const editJson = (await editResponse.json().catch(() => ({}))) as { previewId?: unknown };
+                const previewId = typeof editJson.previewId === "string" ? editJson.previewId : null;
+                if (!previewId) {
+                  throw new Error("Invalid /api/edit-tile response: missing previewId");
+                }
+                runCleanupPreviewIds.add(previewId);
+
+                let decision: ReviewDecision;
+                try {
+                  decision = await waitForDecisionWithAbort(
+                    reviewQueue.enqueue({
+                      anchorId: anchor.id,
+                      x: anchor.x,
+                      y: anchor.y,
+                      z: MAX_Z,
+                      previewId,
+                      timelineIndex: runTimeline,
+                      modelVariant: nextVariant,
+                      attempt: ctx.attempt,
+                      prompt: options.prompt,
+                    }),
+                    ctx.signal,
+                  );
+                } catch (error) {
+                  await deletePreviewById(previewId, runTimeline, ctx.signal).catch(() => null);
+                  runCleanupPreviewIds.delete(previewId);
+                  throw error;
+                }
+
+                if (decision === "REJECT") {
+                  await deletePreviewById(previewId, runTimeline, ctx.signal).catch(() => null);
+                  runCleanupPreviewIds.delete(previewId);
+                  nextVariant = "nano_banana_pro";
+                  continue;
+                }
+
+                const confirmResponse = await fetch(
+                  withMapTimeline(`/api/confirm-edit/${MAX_Z}/${anchor.x}/${anchor.y}`, mapId, runTimeline),
+                  {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      previewUrl: withMapTimeline(`/api/preview/${previewId}`, mapId, runTimeline),
+                      previewMode: "blended",
+                      skipParentRefresh: true,
+                    }),
+                    signal: ctx.signal,
+                  },
+                );
+                if (!confirmResponse.ok) {
+                  const message = await readErrorMessageFromResponse(confirmResponse, "Failed to confirm edit");
+                  await deletePreviewById(previewId, runTimeline, ctx.signal).catch(() => null);
+                  runCleanupPreviewIds.delete(previewId);
+                  throw new Error(message);
+                }
+
+                runCleanupPreviewIds.delete(previewId);
+                return;
+              }
+            }
+          : undefined;
 
       const handle = startBatchRun({
         mapId,
@@ -287,7 +507,9 @@ export default function MapClient({ mapId, mapWidth, mapHeight }: Props) {
         maxParallel: options.maxParallel,
         prompt: options.prompt,
         modelVariant: options.modelVariant,
+        executeAnchor,
         onState: (nextState) => {
+          if (batchRunTokenRef.current !== runToken) return;
           setBatchState(nextState);
           if (nextState.waves.length > observedWaveCount) {
             const updatedLeafKeys = new Set<string>();
@@ -328,6 +550,8 @@ export default function MapClient({ mapId, mapWidth, mapHeight }: Props) {
 
       void handle.done
         .then((finalState) => {
+          if (batchRunTokenRef.current !== runToken) return;
+          if (batchHandleRef.current !== handle) return;
           setBatchState(finalState);
           const touchedLeaves = Array.from(touchedLeafKeys)
             .map(parseLeafKey)
@@ -338,13 +562,40 @@ export default function MapClient({ mapId, mapWidth, mapHeight }: Props) {
             void refreshVisibleTiles(runTimeline);
           }
         })
-        .finally(() => {
+        .finally(async () => {
+          if (batchRunTokenRef.current === runToken) {
+            batchRunTokenRef.current = null;
+          }
+          if (reviewQueueRef.current === reviewQueue) {
+            reviewQueueRef.current?.cancelAll("Batch run finished");
+            reviewQueueRef.current = null;
+          }
+          await cleanupPreviewIds(runCleanupPreviewIds, runTimeline);
+          if (batchHandleRef.current === handle) {
+            clearReviewUiState();
+            setReviewEnabled(false);
+            runTimelineRef.current = null;
+            cleanupPreviewIdsRef.current.clear();
+          }
           if (batchHandleRef.current === handle) {
             batchHandleRef.current = null;
           }
         });
     },
-    [batchOrigin, fitMapToLeafBounds, isMaxZoomTileInBounds, mapHeight, mapId, mapWidth, refreshRenderedTilesForLeafCoords, refreshVisibleTiles],
+    [
+      batchOrigin,
+      cleanupPreviewIds,
+      clearReviewUiState,
+      deletePreviewById,
+      fitMapToLeafBounds,
+      isMaxZoomTileInBounds,
+      mapHeight,
+      mapId,
+      mapWidth,
+      refreshRenderedTilesForLeafCoords,
+      refreshVisibleTiles,
+      syncReviewQueueState,
+    ],
   );
 
   const pollTileStatus = useCallback(
@@ -681,6 +932,11 @@ export default function MapClient({ mapId, mapWidth, mapHeight }: Props) {
   }, [checkTileExists, isMaxZoomTileInBounds, mapHeight, mapId, mapWidth, timelineKey, updateURL, writeUrlState]);
 
   const batchRunning = batchState?.status === "RUNNING" || batchState?.status === "COMPLETING";
+  const reviewStatus = {
+    enabled: reviewEnabled,
+    active: reviewActiveItem ? 1 : 0,
+    queued: reviewPendingItems.length,
+  };
 
   return (
     <div className="w-full h-full relative">
@@ -760,7 +1016,18 @@ export default function MapClient({ mapId, mapWidth, mapHeight }: Props) {
         />
       )}
 
-      <BatchStatusPanel state={batchState} onCancel={cancelBatchRun} />
+      <BatchReviewModal
+        open={batchRunning && reviewStatus.enabled && reviewActiveItem != null}
+        mapId={mapId}
+        item={reviewActiveItem}
+        pendingCount={reviewStatus.queued}
+        busy={reviewBusy}
+        onAccept={() => resolveReviewDecision("ACCEPT")}
+        onReject={() => resolveReviewDecision("REJECT")}
+        onCancelBatch={cancelBatchRun}
+      />
+
+      <BatchStatusPanel state={batchState} onCancel={cancelBatchRun} review={reviewStatus} />
 
       {timelineNodes.length > 0 && (
         <TimelineBar

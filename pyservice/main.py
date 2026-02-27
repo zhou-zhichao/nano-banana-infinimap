@@ -29,6 +29,7 @@ logger = logging.getLogger("py-image-service")
 
 PROMPT_INSTRUCTION = ""
 DEFAULT_LOCATION = "us-central1"
+DEFAULT_MODEL_FLASH_PREVIEW = "gemini-3.1-flash-image-preview"
 DEFAULT_MODEL = "gemini-2.5-flash-image"
 DEFAULT_MODEL_PRO = "gemini-3-pro-image-preview"
 DEFAULT_STREAM_TIMEOUT_MS = 90_000
@@ -42,16 +43,19 @@ DEFAULT_AUTH_MODE = "auto"
 DEFAULT_KEY_PROFILE = "gemini"
 DEFAULT_API_KEY_BACKEND = "auto"
 
+MODEL_BUCKET_FLASH_PREVIEW = "nano_banana_flash_preview"
 MODEL_BUCKET_NANO = "nano_banana"
 MODEL_BUCKET_PRO = "nano_banana_pro"
-MODEL_BUCKETS = (MODEL_BUCKET_NANO, MODEL_BUCKET_PRO)
+MODEL_BUCKETS = (MODEL_BUCKET_FLASH_PREVIEW, MODEL_BUCKET_NANO, MODEL_BUCKET_PRO)
 MODEL_BUCKET_LABELS: dict[str, str] = {
+    MODEL_BUCKET_FLASH_PREVIEW: "Nano Banana 2",
     MODEL_BUCKET_NANO: "Nano Banana",
     MODEL_BUCKET_PRO: "Nano Banana Pro",
 }
 
 DEFAULT_GEMINI_RATE_LIMIT_STATE_PATH = ".temp/gemini-rate-limit-state.json"
 DEFAULT_GEMINI_RATE_LIMIT_DEFAULTS: dict[str, dict[str, int]] = {
+    MODEL_BUCKET_FLASH_PREVIEW: {"rpm": 100, "rpd": 1_000},
     MODEL_BUCKET_NANO: {"rpm": 500, "rpd": 2_000},
     MODEL_BUCKET_PRO: {"rpm": 20, "rpd": 250},
 }
@@ -170,6 +174,10 @@ def get_vertex_location() -> str:
 
 def get_vertex_model() -> str:
     return os.environ.get("VERTEX_MODEL", DEFAULT_MODEL)
+
+
+def get_vertex_model_flash_preview() -> str:
+    return os.environ.get("VERTEX_MODEL_FLASH_PREVIEW", DEFAULT_MODEL_FLASH_PREVIEW)
 
 
 def get_vertex_model_pro() -> str:
@@ -427,15 +435,20 @@ def get_candidate_models(preferred_model: str | None = None) -> list[str]:
 
 def classify_model_bucket(model_name: str, preferred_model: str | None = None) -> str:
     normalized = (model_name or "").strip()
+    flash_preview_model = (get_vertex_model_flash_preview() or "").strip()
     base_model = (get_vertex_model() or "").strip()
     pro_model = (get_vertex_model_pro() or "").strip()
     if normalized and normalized == pro_model:
         return MODEL_BUCKET_PRO
+    if normalized and normalized == flash_preview_model:
+        return MODEL_BUCKET_FLASH_PREVIEW
     if normalized and normalized == base_model:
         return MODEL_BUCKET_NANO
     preferred = (preferred_model or "").strip()
     if preferred and preferred == pro_model:
         return MODEL_BUCKET_PRO
+    if preferred and preferred == flash_preview_model:
+        return MODEL_BUCKET_FLASH_PREVIEW
     return MODEL_BUCKET_NANO
 
 
@@ -993,6 +1006,7 @@ async def healthz() -> dict:
         "api_key_backend": get_api_key_backend(),
         "effective_api_backend": get_effective_api_backend(),
         "api_key_pool_size": len(api_keys),
+        "vertex_model_flash_preview": get_vertex_model_flash_preview(),
         "vertex_model": get_vertex_model(),
         "vertex_model_pro": get_vertex_model_pro(),
         "model_fallbacks": get_model_fallbacks(),

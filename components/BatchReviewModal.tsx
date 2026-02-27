@@ -60,6 +60,13 @@ function compose5x5WithCenter(base5x5: string[][], center3x3: string[][] | null)
   return composed;
 }
 
+function isEditableTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  if (target.isContentEditable) return true;
+  const tag = target.tagName.toLowerCase();
+  return tag === "input" || tag === "textarea" || tag === "select";
+}
+
 async function extractTilesFromComposite(compositeUrl: string, signal?: AbortSignal): Promise<string[][]> {
   const response = await fetch(compositeUrl, { cache: "no-store", signal });
   if (!response.ok) {
@@ -229,6 +236,31 @@ export default function BatchReviewModal({
   const disabled = busy || loading || !item;
   const showOpen = open && item != null;
 
+  useEffect(() => {
+    if (!showOpen || disabled) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented) return;
+      if (event.isComposing || event.repeat) return;
+      if (event.ctrlKey || event.metaKey || event.altKey) return;
+      if (isEditableTarget(event.target)) return;
+
+      if (event.key === "Enter") {
+        event.preventDefault();
+        void onAccept();
+        return;
+      }
+      if (event.key === "Backspace") {
+        event.preventDefault();
+        void onReject();
+      }
+    };
+
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [disabled, onAccept, onReject, showOpen]);
+
   return (
     <Dialog.Root open={showOpen} onOpenChange={(nextOpen) => { if (!nextOpen) onCancelBatch(); }}>
       <Dialog.Portal>
@@ -301,7 +333,7 @@ export default function BatchReviewModal({
                 void onReject();
               }}
             >
-              Reject (Regenerate Pro)
+              Reject (Backspace)
             </button>
             <button
               type="button"
@@ -311,7 +343,7 @@ export default function BatchReviewModal({
                 void onAccept();
               }}
             >
-              Accept
+              Accept (Enter)
             </button>
           </div>
         </Dialog.Content>

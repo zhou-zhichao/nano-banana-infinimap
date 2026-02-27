@@ -10,7 +10,7 @@ This fork runs image generation through a local Python FastAPI service backed by
 - Sharp image processing
 - Local file-based tile store
 - Python FastAPI image service (`pyservice/`)
-- Vertex AI model default: `gemini-2.5-flash-image`
+- Vertex AI model default: `gemini-3.1-flash-image-preview`
 
 ## Prerequisites
 
@@ -63,7 +63,7 @@ GOOGLE_CLOUD_API_KEY_GEMINI="your-gemini-key-1,your-gemini-key-2,your-gemini-key
 GOOGLE_CLOUD_API_KEY_AISTUDIO="your-aistudio-key"
 GEMINI_RATE_LIMIT_ENABLED="1"
 GEMINI_RATE_LIMIT_STATE_PATH=".temp/gemini-rate-limit-state.json"
-GEMINI_RATE_LIMIT_DEFAULTS_JSON='{"nano_banana":{"rpm":500,"rpd":2000},"nano_banana_pro":{"rpm":20,"rpd":250}}'
+GEMINI_RATE_LIMIT_DEFAULTS_JSON='{"nano_banana_flash_preview":{"rpm":100,"rpd":1000},"nano_banana":{"rpm":500,"rpd":2000},"nano_banana_pro":{"rpm":20,"rpd":250}}'
 GEMINI_RATE_LIMIT_POLL_MS="5000"
 ```
 
@@ -79,6 +79,7 @@ PY_IMAGE_SERVICE_MAX_ATTEMPTS="1"
 VERTEX_PROJECT_ID="lucid-formula-484716-e0"
 VERTEX_LOCATION="us-central1"
 VERTEX_AUTH_MODE="api_key"
+VERTEX_MODEL_FLASH_PREVIEW="gemini-3.1-flash-image-preview"
 VERTEX_MODEL="gemini-2.5-flash-image"
 VERTEX_MODEL_PRO="gemini-3-pro-image-preview"
 VERTEX_MODEL_FALLBACKS=""
@@ -97,7 +98,7 @@ GOOGLE_CLOUD_API_KEY_AISTUDIO=""
 GOOGLE_CLOUD_API_KEY=""
 GEMINI_RATE_LIMIT_ENABLED="1"
 GEMINI_RATE_LIMIT_STATE_PATH=".temp/gemini-rate-limit-state.json"
-GEMINI_RATE_LIMIT_DEFAULTS_JSON='{"nano_banana":{"rpm":500,"rpd":2000},"nano_banana_pro":{"rpm":20,"rpd":250}}'
+GEMINI_RATE_LIMIT_DEFAULTS_JSON='{"nano_banana_flash_preview":{"rpm":100,"rpd":1000},"nano_banana":{"rpm":500,"rpd":2000},"nano_banana_pro":{"rpm":20,"rpd":250}}'
 GEMINI_RATE_LIMIT_POLL_MS="5000"
 SEAM_BAND_PX="48"
 SEAM_MULTIBAND_NUM_BANDS="5"
@@ -196,7 +197,8 @@ cloudflared tunnel --url http://127.0.0.1:3000
 Notes:
 - If `BASIC_AUTH_USER` or `BASIC_AUTH_PASSWORD` is empty, auth is disabled.
 - Use a strong password before exposing the service publicly.
-- In the Generate Preview modal, you can choose `Nano Banana` or `Nano Banana Pro` before generation.
+- In the Generate Preview modal, you can choose `Nano Banana Flash Preview`, `Nano Banana`, or `Nano Banana Pro`.
+- `Nano Banana Flash Preview` uses `VERTEX_MODEL_FLASH_PREVIEW` (default `gemini-3.1-flash-image-preview`) and is selected by default for single and batch generation.
 - `Nano Banana Pro` uses `VERTEX_MODEL_PRO` (default `gemini-3-pro-image-preview`), and will fall back to `VERTEX_MODEL`/fallback list if unavailable.
 
 ## Health Check
@@ -222,6 +224,7 @@ Expected result includes:
 - `effective_auth_mode`
 - `api_key_profile`
 - `api_key_backend`
+- `vertex_model_flash_preview`
 - `vertex_model`
 - `auth_mode`
 - `candidate_models`
@@ -248,7 +251,7 @@ Expected result includes:
 - Blended mode no longer supports per-tile apply/skip; it always applies the in-bounds center `3x3` seam result.
 - Seam tuning env vars: `SEAM_BAND_PX` (default `48`) and `SEAM_MULTIBAND_NUM_BANDS` (default `5`).
 - Rate limit responses are surfaced as `429` with `Retry-After`, instead of being collapsed into generic `500`.
-- Sidebar (`/map`) shows aggregated `RPM/RPD` for `Nano Banana` and `Nano Banana Pro`.
+- Sidebar (`/map`) shows aggregated `RPM/RPD` for `Nano Banana Flash Preview`, `Nano Banana`, and `Nano Banana Pro`.
 - Next.js proxy endpoint `/api/rate-limit-status` reads Python `/v1/rate-limit-status` for frontend polling.
 - Local key-pool limiter persists to disk (`GEMINI_RATE_LIMIT_STATE_PATH`), so counters survive service restarts.
 - Generation UI disables model actions when local limiter reports exhausted quota; backend still enforces hard `429`.

@@ -35,6 +35,7 @@ export default function TilemapSidebar({ tilemaps, activeMapId, onSelect, onCrea
     () =>
       rateLimit
         ? [
+            { key: "nano_banana_flash_preview" as const, data: rateLimit.models.nano_banana_flash_preview },
             { key: "nano_banana" as const, data: rateLimit.models.nano_banana },
             { key: "nano_banana_pro" as const, data: rateLimit.models.nano_banana_pro },
           ]

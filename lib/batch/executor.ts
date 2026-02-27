@@ -24,6 +24,8 @@ type RefreshParentHookRequest = {
   signal: AbortSignal;
 };
 
+type SchedulingMode = "wave_barrier" | "rolling_fill";
+
 export type StartBatchRunInput = {
   mapId: string;
   timelineIndex: number;
@@ -43,6 +45,7 @@ export type StartBatchRunInput = {
   parentWaveBatchSize?: number;
   parentLeafBatchSize?: number;
   parentCascadeDepth?: number;
+  schedulingMode?: SchedulingMode;
   fetchImpl?: FetchLike;
   signal?: AbortSignal;
   onState?: (state: BatchRunState) => void;
@@ -257,6 +260,7 @@ export function startBatchRun(input: StartBatchRunInput): BatchRunHandle {
   const parentWaveBatchSize = clampInt(input.parentWaveBatchSize ?? 3, 1, 64);
   const parentLeafBatchSize = clampInt(input.parentLeafBatchSize ?? 256, 1, 10_000);
   const parentCascadeDepth = clampInt(input.parentCascadeDepth ?? 2, 0, z);
+  const schedulingMode: SchedulingMode = input.schedulingMode ?? "wave_barrier";
 
   const fetchImpl = input.fetchImpl ?? fetch;
   const abortController = new AbortController();
@@ -366,6 +370,36 @@ export function startBatchRun(input: StartBatchRunInput): BatchRunHandle {
       selected.push(readyIds[0]);
     }
     return selected;
+  };
+
+  const resolveBlockedAnchors = (): boolean => {
+    const pendingAnchors = Object.values(state.anchors).filter((anchor) => anchor.status === "PENDING");
+    if (pendingAnchors.length === 0) {
+      return false;
+    }
+    let blockedAny = false;
+    for (const anchor of pendingAnchors) {
+      const blocker = anchor.deps.find((depId) => {
+        const depStatus = state.anchors[depId]?.status;
+        return depStatus === "FAILED" || depStatus === "BLOCKED";
+      });
+      if (!blocker) continue;
+      anchor.status = "BLOCKED";
+      anchor.blockedBy = blocker;
+      anchor.finishedAt = Date.now();
+      blockedAny = true;
+    }
+    return blockedAny;
+  };
+
+  const blockUnreachablePendingAnchors = (): void => {
+    const pendingAnchors = Object.values(state.anchors).filter((anchor) => anchor.status === "PENDING");
+    for (const anchor of pendingAnchors) {
+      if (anchor.status !== "PENDING") continue;
+      anchor.status = "BLOCKED";
+      anchor.blockedBy = anchor.deps[0];
+      anchor.finishedAt = Date.now();
+    }
   };
 
   const runAnchorOverApi = async (anchor: AnchorTask): Promise<void> => {
@@ -655,117 +689,236 @@ export function startBatchRun(input: StartBatchRunInput): BatchRunHandle {
   };
 
   const parentWorkers = Array.from({ length: parentWorkerConcurrency }, () => parentWorkerLoop());
+  type RollingAnchorOutcome =
+    | {
+        id: string;
+        result: AnchorExecutionResult;
+        finishedAt: number;
+      }
+    | {
+        id: string;
+        error: unknown;
+        finishedAt: number;
+      };
+  const rollingInFlight = new Map<string, Promise<RollingAnchorOutcome>>();
+
+  const runGenerationWaveBarrier = async () => {
+    while (true) {
+      ensureNotAborted(signal);
+      if (fatalError) throw fatalError;
+
+      const pendingAnchors = Object.values(state.anchors).filter((anchor) => anchor.status === "PENDING");
+      if (pendingAnchors.length === 0) {
+        break;
+      }
+
+      const blockedAny = resolveBlockedAnchors();
+      if (blockedAny) {
+        emit();
+        continue;
+      }
+
+      const readyIds = selectReadyAnchorIds();
+      if (readyIds.length === 0) {
+        // Safety: any remaining pending tasks are no longer reachable.
+        blockUnreachablePendingAnchors();
+        emit();
+        continue;
+      }
+
+      const waveIds = pickWaveAnchorIds(readyIds);
+      if (waveIds.length === 0) {
+        await sleep(25, signal);
+        continue;
+      }
+
+      const waveIndex = state.currentWave + 1;
+      state.currentWave = waveIndex;
+      const waveStartedAt = Date.now();
+      for (const id of waveIds) {
+        const anchor = state.anchors[id];
+        if (!anchor) continue;
+        anchor.status = "RUNNING";
+        anchor.waveIndex = waveIndex;
+        anchor.startedAt = waveStartedAt;
+      }
+      emit();
+
+      const outcomes = await Promise.all(
+        waveIds.map(async (id) => {
+          const anchor = state.anchors[id];
+          if (!anchor) {
+            return {
+              id,
+              result: {
+                ok: false,
+                error: "Anchor not found",
+                retryAfterMs: null,
+              } as AnchorExecutionResult,
+            };
+          }
+          const result = await runAnchorWithRetry(anchor);
+          return { id, result };
+        }),
+      );
+
+      const waveFinishedAt = Date.now();
+      const successIds: string[] = [];
+      const failedIds: string[] = [];
+      const blockedIds: string[] = [];
+      for (const outcome of outcomes) {
+        const anchor = state.anchors[outcome.id];
+        if (!anchor) continue;
+        anchor.finishedAt = waveFinishedAt;
+        if (outcome.result.ok) {
+          anchor.status = "SUCCESS";
+          anchor.error = undefined;
+          successIds.push(anchor.id);
+          continue;
+        }
+        anchor.status = "FAILED";
+        anchor.error = outcome.result.error;
+        failedIds.push(anchor.id);
+        blockedIds.push(...propagateBlockedFrom(anchor.id));
+      }
+
+      const uniqueBlocked = Array.from(new Set(blockedIds));
+      state.waves.push({
+        waveIndex,
+        taskIds: [...waveIds],
+        successIds,
+        failedIds,
+        blockedIds: uniqueBlocked,
+        startedAt: waveStartedAt,
+        finishedAt: waveFinishedAt,
+      });
+      emit();
+      markDirtyParentLeaves(waveIndex, successIds);
+    }
+  };
+
+  const runGenerationRollingFill = async () => {
+    while (true) {
+      ensureNotAborted(signal);
+      if (fatalError) throw fatalError;
+
+      const blockedAny = resolveBlockedAnchors();
+      if (blockedAny) {
+        emit();
+        continue;
+      }
+
+      let scheduledAny = false;
+      while (rollingInFlight.size < maxParallel) {
+        const readyIds = selectReadyAnchorIds();
+        if (readyIds.length === 0) break;
+
+        let nextId: string | null = null;
+        for (const id of readyIds) {
+          const candidate = state.anchors[id];
+          if (!candidate) continue;
+          const conflictsRunning = Array.from(rollingInFlight.keys()).some((runningId) => {
+            const runningAnchor = state.anchors[runningId];
+            if (!runningAnchor) return false;
+            return anchorsOverlap3x3(candidate, runningAnchor);
+          });
+          if (conflictsRunning) continue;
+          nextId = id;
+          break;
+        }
+
+        if (!nextId) {
+          // Ready tasks exist, but all conflict with currently running anchors.
+          break;
+        }
+
+        const anchor = state.anchors[nextId];
+        if (!anchor) break;
+        const waveIndex = state.currentWave + 1;
+        state.currentWave = waveIndex;
+        const startedAt = Date.now();
+        anchor.status = "RUNNING";
+        anchor.waveIndex = waveIndex;
+        anchor.startedAt = startedAt;
+
+        const runPromise: Promise<RollingAnchorOutcome> = runAnchorWithRetry(anchor)
+          .then((result) => ({ id: nextId!, result, finishedAt: Date.now() }))
+          .catch((error) => ({ id: nextId!, error, finishedAt: Date.now() }));
+        rollingInFlight.set(nextId, runPromise);
+        scheduledAny = true;
+      }
+
+      if (scheduledAny) {
+        emit();
+      }
+
+      const hasPending = Object.values(state.anchors).some((anchor) => anchor.status === "PENDING");
+      if (!hasPending && rollingInFlight.size === 0) {
+        break;
+      }
+
+      if (rollingInFlight.size === 0) {
+        const readyIds = selectReadyAnchorIds();
+        if (readyIds.length === 0) {
+          blockUnreachablePendingAnchors();
+          emit();
+          continue;
+        }
+        await sleep(25, signal);
+        continue;
+      }
+
+      const completed = await Promise.race(Array.from(rollingInFlight.values()));
+      rollingInFlight.delete(completed.id);
+
+      if ("error" in completed) {
+        throw completed.error;
+      }
+
+      const anchor = state.anchors[completed.id];
+      if (!anchor) {
+        throw new Error(`Anchor not found: ${completed.id}`);
+      }
+
+      const successIds: string[] = [];
+      const failedIds: string[] = [];
+      const blockedIds: string[] = [];
+      anchor.finishedAt = completed.finishedAt;
+      if (completed.result.ok) {
+        anchor.status = "SUCCESS";
+        anchor.error = undefined;
+        successIds.push(anchor.id);
+      } else {
+        anchor.status = "FAILED";
+        anchor.error = completed.result.error;
+        failedIds.push(anchor.id);
+        blockedIds.push(...propagateBlockedFrom(anchor.id));
+      }
+
+      const waveIndex = anchor.waveIndex ?? state.currentWave + 1;
+      const waveStartedAt = anchor.startedAt ?? completed.finishedAt;
+      const uniqueBlocked = Array.from(new Set(blockedIds));
+      state.waves.push({
+        waveIndex,
+        taskIds: [anchor.id],
+        successIds,
+        failedIds,
+        blockedIds: uniqueBlocked,
+        startedAt: waveStartedAt,
+        finishedAt: completed.finishedAt,
+      });
+      emit();
+      markDirtyParentLeaves(waveIndex, successIds);
+    }
+  };
 
   const done = (async (): Promise<BatchRunState> => {
     emit();
     try {
-      while (true) {
-        ensureNotAborted(signal);
-        if (fatalError) throw fatalError;
-
-        const pendingAnchors = Object.values(state.anchors).filter((anchor) => anchor.status === "PENDING");
-        if (pendingAnchors.length === 0) {
-          break;
-        }
-
-        let blockedAny = false;
-        for (const anchor of pendingAnchors) {
-          const blocker = anchor.deps.find((depId) => {
-            const depStatus = state.anchors[depId]?.status;
-            return depStatus === "FAILED" || depStatus === "BLOCKED";
-          });
-          if (!blocker) continue;
-          anchor.status = "BLOCKED";
-          anchor.blockedBy = blocker;
-          anchor.finishedAt = Date.now();
-          blockedAny = true;
-        }
-        if (blockedAny) {
-          emit();
-          continue;
-        }
-
-        const readyIds = selectReadyAnchorIds();
-        if (readyIds.length === 0) {
-          // Safety: any remaining pending tasks are no longer reachable.
-          for (const anchor of pendingAnchors) {
-            if (anchor.status !== "PENDING") continue;
-            anchor.status = "BLOCKED";
-            anchor.blockedBy = anchor.deps[0];
-            anchor.finishedAt = Date.now();
-          }
-          emit();
-          continue;
-        }
-
-        const waveIds = pickWaveAnchorIds(readyIds);
-        if (waveIds.length === 0) {
-          await sleep(25, signal);
-          continue;
-        }
-
-        const waveIndex = state.currentWave + 1;
-        state.currentWave = waveIndex;
-        const waveStartedAt = Date.now();
-        for (const id of waveIds) {
-          const anchor = state.anchors[id];
-          if (!anchor) continue;
-          anchor.status = "RUNNING";
-          anchor.waveIndex = waveIndex;
-          anchor.startedAt = waveStartedAt;
-        }
-        emit();
-
-        const outcomes = await Promise.all(
-          waveIds.map(async (id) => {
-            const anchor = state.anchors[id];
-            if (!anchor) {
-              return {
-                id,
-                result: {
-                  ok: false,
-                  error: "Anchor not found",
-                  retryAfterMs: null,
-                } as AnchorExecutionResult,
-              };
-            }
-            const result = await runAnchorWithRetry(anchor);
-            return { id, result };
-          }),
-        );
-
-        const waveFinishedAt = Date.now();
-        const successIds: string[] = [];
-        const failedIds: string[] = [];
-        const blockedIds: string[] = [];
-        for (const outcome of outcomes) {
-          const anchor = state.anchors[outcome.id];
-          if (!anchor) continue;
-          anchor.finishedAt = waveFinishedAt;
-          if (outcome.result.ok) {
-            anchor.status = "SUCCESS";
-            anchor.error = undefined;
-            successIds.push(anchor.id);
-            continue;
-          }
-          anchor.status = "FAILED";
-          anchor.error = outcome.result.error;
-          failedIds.push(anchor.id);
-          blockedIds.push(...propagateBlockedFrom(anchor.id));
-        }
-
-        const uniqueBlocked = Array.from(new Set(blockedIds));
-        state.waves.push({
-          waveIndex,
-          taskIds: [...waveIds],
-          successIds,
-          failedIds,
-          blockedIds: uniqueBlocked,
-          startedAt: waveStartedAt,
-          finishedAt: waveFinishedAt,
-        });
-        emit();
-        markDirtyParentLeaves(waveIndex, successIds);
+      if (schedulingMode === "rolling_fill") {
+        await runGenerationRollingFill();
+      } else {
+        await runGenerationWaveBarrier();
       }
 
       generationFinished = true;
@@ -781,9 +934,10 @@ export function startBatchRun(input: StartBatchRunInput): BatchRunHandle {
       return cloneState(state);
     } catch (error) {
       generationFinished = true;
+      const fatalMessage = fatalError ? (fatalError as Error).message : null;
       if (fatalError || (!signal.aborted && error instanceof Error && error.name !== "AbortError")) {
         state.status = "FAILED";
-        state.error = fatalError ? fatalError.message : toErrorMessage(error, "Batch run failed");
+        state.error = fatalMessage ?? toErrorMessage(error, "Batch run failed");
       } else {
         state.status = "CANCELLED";
         state.error = toErrorMessage(error, "Batch run cancelled");
@@ -791,7 +945,7 @@ export function startBatchRun(input: StartBatchRunInput): BatchRunHandle {
       state.finishedAt = Date.now();
       emit();
       abortController.abort();
-      await Promise.allSettled(parentWorkers);
+      await Promise.allSettled([...rollingInFlight.values(), ...parentWorkers]);
       return cloneState(state);
     }
   })();

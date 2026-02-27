@@ -8,6 +8,23 @@ function delay(ms: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
 
+function createDeferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
+async function waitForCondition(predicate: () => boolean, timeoutMs = 2000, pollMs = 10) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (predicate()) return;
+    await delay(pollMs);
+  }
+  throw new Error(`Timed out after ${timeoutMs}ms`);
+}
+
 function createBaseInput(overrides: Partial<StartBatchRunInput> = {}): StartBatchRunInput {
   return {
     mapId: "test-map",
@@ -47,6 +64,97 @@ test("parallel wave never schedules overlapping 3x3 anchors", async () => {
         );
       }
     }
+  }
+});
+
+test("rolling_fill starts a new anchor after one in-flight task completes", async () => {
+  const started: string[] = [];
+  const centerGate = createDeferred();
+  const firstTwoGates = [createDeferred(), createDeferred()];
+  let blockedNonCenter = 0;
+
+  const handle = startBatchRun(
+    createBaseInput({
+      maxParallel: 2,
+      schedulingMode: "rolling_fill",
+      executeAnchor: async (anchor: AnchorTask) => {
+        started.push(anchor.id);
+        if (anchor.id === "u:0,v:0") {
+          await centerGate.promise;
+          return;
+        }
+        if (blockedNonCenter < 2) {
+          const gate = firstTwoGates[blockedNonCenter];
+          blockedNonCenter += 1;
+          await gate.promise;
+        }
+      },
+      refreshParentLevel: async () => ({ parentTiles: [] as TileCoord[] }),
+    }),
+  );
+
+  try {
+    await waitForCondition(() => started.includes("u:0,v:0"));
+    centerGate.resolve();
+    await waitForCondition(() => blockedNonCenter === 2 && started.length >= 3);
+
+    firstTwoGates[0].resolve();
+    await waitForCondition(() => started.length >= 4);
+
+    firstTwoGates[1].resolve();
+    const finalState = await handle.done;
+    assert.equal(finalState.status, "COMPLETED");
+  } finally {
+    centerGate.resolve();
+    firstTwoGates[0].resolve();
+    firstTwoGates[1].resolve();
+  }
+});
+
+test("wave_barrier waits for all anchors in the wave before scheduling next ones", async () => {
+  const started: string[] = [];
+  const centerGate = createDeferred();
+  const firstTwoGates = [createDeferred(), createDeferred()];
+  let blockedNonCenter = 0;
+
+  const handle = startBatchRun(
+    createBaseInput({
+      maxParallel: 2,
+      schedulingMode: "wave_barrier",
+      executeAnchor: async (anchor: AnchorTask) => {
+        started.push(anchor.id);
+        if (anchor.id === "u:0,v:0") {
+          await centerGate.promise;
+          return;
+        }
+        if (blockedNonCenter < 2) {
+          const gate = firstTwoGates[blockedNonCenter];
+          blockedNonCenter += 1;
+          await gate.promise;
+        }
+      },
+      refreshParentLevel: async () => ({ parentTiles: [] as TileCoord[] }),
+    }),
+  );
+
+  try {
+    await waitForCondition(() => started.includes("u:0,v:0"));
+    centerGate.resolve();
+    await waitForCondition(() => blockedNonCenter === 2 && started.length >= 3);
+
+    firstTwoGates[0].resolve();
+    await delay(180);
+    assert.equal(started.length, 3, "wave_barrier should not schedule the next anchor until the full wave is done");
+
+    firstTwoGates[1].resolve();
+    await waitForCondition(() => started.length >= 4);
+
+    const finalState = await handle.done;
+    assert.equal(finalState.status, "COMPLETED");
+  } finally {
+    centerGate.resolve();
+    firstTwoGates[0].resolve();
+    firstTwoGates[1].resolve();
   }
 });
 

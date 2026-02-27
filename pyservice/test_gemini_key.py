@@ -17,7 +17,7 @@ from google.genai import types
 from google.genai.errors import ClientError
 from PIL import Image
 
-DEFAULT_MODEL = "gemini-2.5-flash-image"
+DEFAULT_MODEL = "gemini-3.1-flash-image-preview"
 DEFAULT_KEY_PROFILE = "gemini"
 DEFAULT_API_KEY_BACKEND = "auto"
 DEFAULT_HTTP_TIMEOUT_MS = 105_000
@@ -273,7 +273,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model",
         default="",
-        help="Model for probe requests. Default: VERTEX_MODEL or gemini-2.5-flash-image.",
+        help="Model for probe requests. Default: VERTEX_MODEL_FLASH_PREVIEW, VERTEX_MODEL, or gemini-3.1-flash-image-preview.",
     )
     parser.add_argument(
         "--timeout-ms",
@@ -311,7 +311,12 @@ def main() -> int:
 
     attempts = max(1, int(args.attempts))
     timeout_ms = get_http_timeout_ms(int(args.timeout_ms))
-    model = (args.model or os.environ.get("VERTEX_MODEL") or DEFAULT_MODEL).strip() or DEFAULT_MODEL
+    model = (
+        args.model
+        or os.environ.get("VERTEX_MODEL_FLASH_PREVIEW")
+        or os.environ.get("VERTEX_MODEL")
+        or DEFAULT_MODEL
+    ).strip() or DEFAULT_MODEL
     grid_png = build_test_grid_png()
     configured_backend = os.environ.get("GOOGLE_CLOUD_API_KEY_BACKEND", DEFAULT_API_KEY_BACKEND)
     backend_hint = args.backend if args.backend != "auto" else configured_backend

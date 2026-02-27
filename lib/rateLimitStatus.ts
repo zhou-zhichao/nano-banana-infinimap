@@ -1,6 +1,6 @@
 import type { ModelVariant } from "./modelVariant";
 
-export type ModelBucket = "nano_banana" | "nano_banana_pro";
+export type ModelBucket = "nano_banana_flash_preview" | "nano_banana" | "nano_banana_pro";
 
 export type RateLimitCounter = {
   used: number;
@@ -24,6 +24,7 @@ export type RateLimitStatusResponse = {
 };
 
 export function bucketForModelVariant(variant: ModelVariant): ModelBucket {
+  if (variant === "nano_banana_flash_preview") return "nano_banana_flash_preview";
   return variant === "nano_banana_pro" ? "nano_banana_pro" : "nano_banana";
 }
 

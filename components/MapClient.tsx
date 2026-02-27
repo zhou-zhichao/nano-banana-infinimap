@@ -505,6 +505,7 @@ export default function MapClient({ mapId, mapWidth, mapHeight }: Props) {
         mapHeight,
         layers: options.layers,
         maxParallel: options.maxParallel,
+        schedulingMode: options.requireReview ? "rolling_fill" : "wave_barrier",
         prompt: options.prompt,
         modelVariant: options.modelVariant,
         executeAnchor,

@@ -23,6 +23,7 @@ const responseSchema = z.object({
   updated_at: z.string(),
   poll_ms: z.number().int().positive().optional(),
   models: z.object({
+    nano_banana_flash_preview: modelStatusSchema,
     nano_banana: modelStatusSchema,
     nano_banana_pro: modelStatusSchema,
   }),

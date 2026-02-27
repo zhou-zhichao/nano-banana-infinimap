@@ -169,6 +169,7 @@ corepack yarn regen:parents [mapId|preset:moon]
 Realtime parent policy:
 
 - Realtime parent regeneration for direct tile updates runs on `confirm-edit` and `delete`.
+- Delete behavior differs by template: `moon` maps clear only the current timeline-node override and fall back to lower-layer/base moon content; non-`moon` maps keep tombstone delete semantics.
 - Batch generation uses deferred parent refresh waves via `/api/parents/refresh-region`.
 
 ## Public Internet Access + Password

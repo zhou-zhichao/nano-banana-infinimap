@@ -245,7 +245,7 @@ export default function MapClient({ mapId, mapWidth, mapHeight }: Props) {
       try {
         const response = await fetch(withMapTimeline(`/api/meta/${MAX_Z}/${x}/${y}`, mapId, timelineIndex));
         const data = await response.json();
-        const exists = data.status === "READY";
+        const exists = typeof data?.hasCurrentOverride === "boolean" ? data.hasCurrentOverride : data.status === "READY";
         if (timelineIndex === activeTimelineRef.current) {
           setTileExists((prev) => ({ ...prev, [timelineKey(timelineIndex, x, y)]: exists }));
         }

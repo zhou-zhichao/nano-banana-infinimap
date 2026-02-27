@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { isTileInBounds } from "@/lib/tilemaps/bounds";
 import { MapContextError, resolveMapContext } from "@/lib/tilemaps/context";
 import { parseTimelineIndexFromRequest, resolveTimelineContext } from "@/lib/timeline/context";
-import { resolveEffectiveTileMeta } from "@/lib/timeline/storage";
+import { readTimelineNodeMeta, resolveEffectiveTileMeta } from "@/lib/timeline/storage";
 
 export async function GET(req: Request, { params }: { params: Promise<{ z: string; x: string; y: string }> }) {
   let mapId = "default";
@@ -26,15 +26,30 @@ export async function GET(req: Request, { params }: { params: Promise<{ z: strin
   const x = Number(xStr);
   const y = Number(yStr);
   if (!isTileInBounds(map, z, x, y)) {
-    return NextResponse.json({ status: "EMPTY", hash: "EMPTY", updatedAt: null, timelineIndex });
+    return NextResponse.json({
+      status: "EMPTY",
+      hash: "EMPTY",
+      updatedAt: null,
+      sourceIndex: null,
+      hasCurrentOverride: false,
+      isCleanMoonBase: false,
+      timelineIndex,
+    });
   }
 
   const timeline = await resolveTimelineContext(mapId, timelineIndex);
   const meta = await resolveEffectiveTileMeta(timeline, z, x, y);
+  const currentNodeMeta = await readTimelineNodeMeta(mapId, timeline.node.id, z, x, y);
+  const hasCurrentOverride = currentNodeMeta?.status === "READY" && currentNodeMeta?.tombstone !== true;
+  const isCleanMoonBase = map.template === "moon" && meta.sourceIndex === null && meta.status === "READY";
+
   return NextResponse.json({
     status: meta.status,
     hash: meta.hash,
     updatedAt: meta.updatedAt,
+    sourceIndex: meta.sourceIndex,
+    hasCurrentOverride,
+    isCleanMoonBase,
     timelineIndex: timeline.index,
   });
 }

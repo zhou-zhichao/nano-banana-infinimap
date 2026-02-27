@@ -143,6 +143,19 @@ export async function markTimelineTileTombstone(
   });
 }
 
+export async function clearTimelineTileOverride(
+  mapId: string,
+  nodeId: string,
+  z: number,
+  x: number,
+  y: number,
+) {
+  await withFileLock(mapId, tileLockName(nodeId, z, x, y), async () => {
+    await fs.rm(mapTimelineNodeTilePath(mapId, nodeId, z, x, y), { force: true }).catch(() => {});
+    await fs.rm(mapTimelineNodeMetaPath(mapId, nodeId, z, x, y), { force: true }).catch(() => {});
+  });
+}
+
 export interface ResolvedTimelineTileMeta {
   status: TimelineTileStatus;
   hash: string;

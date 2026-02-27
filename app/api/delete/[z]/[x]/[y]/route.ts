@@ -5,7 +5,7 @@ import { generateParentTileAtNode } from "@/lib/parentTiles";
 import { isTileInBounds } from "@/lib/tilemaps/bounds";
 import { MapContextError, resolveMapContext } from "@/lib/tilemaps/context";
 import { parseTimelineIndexFromRequest, resolveTimelineContext } from "@/lib/timeline/context";
-import { markTimelineTileTombstone } from "@/lib/timeline/storage";
+import { clearTimelineTileOverride, markTimelineTileTombstone } from "@/lib/timeline/storage";
 
 export async function DELETE(req: NextRequest, { params }: { params: Promise<{ z: string; x: string; y: string }> }) {
   let mapId = "default";
@@ -38,7 +38,11 @@ export async function DELETE(req: NextRequest, { params }: { params: Promise<{ z
 
   try {
     const timeline = await resolveTimelineContext(mapId, timelineIndex);
-    await markTimelineTileTombstone(mapId, timeline.node.id, z, x, y);
+    if (map.template === "moon") {
+      await clearTimelineTileOverride(mapId, timeline.node.id, z, x, y);
+    } else {
+      await markTimelineTileTombstone(mapId, timeline.node.id, z, x, y);
+    }
 
     if (shouldGenerateRealtimeParentTiles(mapId, "delete")) {
       let cz = z;
